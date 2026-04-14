@@ -1,0 +1,19 @@
+env: CartPole-v1
+total_timesteps: 131072
+eval_freq: 4096
+buffer_size: 131072
+fill_buffer: 2048
+batch_size: 256
+learning_rate: 0.0003
+critic_learning_rate: 0.0003
+dual_learning_rate: 0.01
+gamma: 0.99
+polyak: 0.995
+epsilon: 0.1
+epsilon_policy: 0.01
+actor_kwargs:
+  activation: tanh
+  hidden_layer_sizes: [64, 64]
+critic_kwargs:
+  activation: tanh
+  hidden_layer_sizes: [64, 64]

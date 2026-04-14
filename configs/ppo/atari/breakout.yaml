@@ -1,0 +1,22 @@
+env: atari/Breakout-v5
+agent_kwargs:
+  activation: relu
+  hidden_layer_sizes: [512]
+encoder_kwargs:
+  encoder: nature
+  features_dim: 512
+num_envs: 8
+num_steps: 128
+num_minibatches: 4
+num_epochs: 4
+learning_rate: 0.00025
+max_grad_norm: 0.5
+total_timesteps: 10000000
+eval_freq: 100000
+gamma: 0.99
+gae_lambda: 0.95
+clip_eps: 0.1
+ent_coef: 0.01
+vf_coef: 0.5
+normalize_observations: false
+normalize_rewards: false

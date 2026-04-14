@@ -1,0 +1,196 @@
+import dataclasses
+import warnings
+from copy import copy
+from functools import partial
+
+import jax
+import jumanji
+import numpy as np
+from gymnax.environments import spaces
+from gymnax.environments.environment import Environment as GymnaxEnv
+from gymnax.environments.environment import EnvParams
+from jax import numpy as jnp
+from jumanji.env import Environment as JumanjiEnv
+from jumanji.specs import Array, BoundedArray, DiscreteArray, MultiDiscreteArray, Spec
+from jumanji.types import StepType
+
+
+def create_jumanji(env_name, flatten_obs=True, **kwargs):
+    env = jumanji.make(env_name, **kwargs)
+    env = Jumanji2GymnaxEnv(env)
+    if flatten_obs:
+        env = FlattenObsWrapper(env)
+    return env, env.default_params
+
+
+def convert_spec(spec: Spec) -> spaces.Space:
+    if isinstance(spec, MultiDiscreteArray):
+        # jumaji max-vals are traced, but gymnax asserts on their value.
+        # impossible to fix...
+        raise NotImplementedError("MultiDiscreteArray is not supported (yet? PR!)")
+    elif isinstance(spec, DiscreteArray):
+        return spaces.Discrete(num_categories=int(spec.num_values))
+    elif isinstance(spec, BoundedArray):
+        return spaces.Box(low=spec.minimum, high=spec.maximum, shape=spec.shape, dtype=spec.dtype)
+    elif isinstance(spec, Array):
+        return spaces.Box(low=-jnp.inf, high=jnp.inf, shape=spec.shape, dtype=spec.dtype)
+    return spaces.Dict({k: convert_spec(v) for k, v in spec._specs.items()})
+
+
+def num_entries(space: spaces.Space) -> int:
+    if isinstance(space, spaces.Discrete):
+        return 1
+    elif isinstance(space, spaces.Box):
+        return np.prod(np.array(space.shape)).astype(int)
+    elif isinstance(space, spaces.Dict):
+        return sum(num_entries(subspace) for subspace in space.spaces.values())
+    raise ValueError(f"Unsupported space {space}")
+
+
+def flatten_obs(obs):
+    leaves = jax.tree.leaves(obs)
+    return jnp.concatenate([leaf.reshape(-1).astype(jnp.float32) for leaf in leaves])
+
+
+def observation_to_dict(obs):
+    if dataclasses.is_dataclass(obs):
+        return dict(dataclasses.fields(obs))
+    elif isinstance(obs, tuple):
+        try:
+            return obs._asdict()  # defined for namedtuples
+        except AttributeError:
+            msg = f"I don't know how to convert observations of type {type(obs)}"
+            raise ValueError(msg) from None
+
+
+class Jumanji2GymnaxEnv(GymnaxEnv):
+    def __init__(self, env: JumanjiEnv):
+        self.env = env
+        self.max_steps_in_episode = getattr(env, "time_limit", 1000)
+
+        # Check if action space is flat (1D array, not Dict or nested structure)
+        action_spec = env.action_spec
+        if not isinstance(action_spec, (DiscreteArray, BoundedArray)):
+            raise NotImplementedError(
+                "nexrl.compat.jumanji2gymnax only supports flat action spaces. "
+                f"Got action spec of type: {type(action_spec).__name__}"
+            )
+
+        if isinstance(action_spec, MultiDiscreteArray):
+            raise NotImplementedError(
+                "nexrl.compat.jumanji2gymnax only supports flat action spaces. "
+                f"Got action spec of type: {type(action_spec).__name__}"
+            )
+
+        # For array-based actions, ensure they are flat (scalar or 1D)
+        if len(action_spec.shape) > 1:
+            raise NotImplementedError(
+                "nexrl.compat.jumanji2gymnax only supports flat action arrays. "
+                f"Got action spec with shape: {action_spec.shape}"
+            )
+
+    @property
+    def default_params(self):
+        return EnvParams(max_steps_in_episode=self.max_steps_in_episode)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, key, state, action, params):
+        # We overwrite to tree map reset selection
+        if params is None:
+            params = self.default_params
+        key, key_reset = jax.random.split(key)
+        obs_st, state_st, reward, done, info = self.step_env(key, state, action, params)
+        obs_re, state_re = self.reset_env(key_reset, params)
+
+        # Tree map over observation as well, to
+        state, obs = jax.tree.map(
+            lambda x, y: jax.lax.select(done, x, y),
+            (state_re, obs_re),
+            (state_st, obs_st),
+        )
+        return obs, state, reward, done, info
+
+    def step_env(self, key, state, action, params):
+        # Is this reasonable? Should we let Jumanji handle this?
+        if "key" in dataclasses.fields(state):
+            state = dataclasses.replace(state, key=key)
+
+        if isinstance(self.action_space(params), spaces.Discrete):
+            action = action.astype(int)
+
+        state, obs = self.env.step(state, action)
+        done = obs.step_type == StepType.LAST
+        obs_obs = observation_to_dict(obs.observation)
+        return obs_obs, state, obs.reward, done, obs.extras
+
+    def reset_env(self, key, params):
+        state, obs = self.env.reset(key)
+        obs_obs = observation_to_dict(obs.observation)
+        return obs_obs, state
+
+    def get_obs(self, state):
+        # We could implement it by including the obs in the state, but I will wait
+        # until someone raises an issue...
+        raise NotImplementedError
+
+    def is_terminal(self, state):
+        # see Jumanji2GymnaxEnv.get_obs
+        raise NotImplementedError
+
+    @property
+    def name(self):
+        return self.env.unwrapped.__class__.__name__
+
+    def action_space(self, params):
+        spec = self.env.action_spec
+        return convert_spec(spec)
+
+    def observation_space(self, params):
+        spec = self.env.observation_spec
+        # This is a little hacky since it accesses a private attribute, but the jumanji
+        # specs do not expose the name of each spec. Using spec.generate_value is not an
+        # option since we wouldn't know the minvals/maxvals of bounded arrays.
+        return spaces.Dict({n: convert_spec(s) for n, s in spec._specs.items()})
+
+    @property
+    def num_entries(self) -> int:
+        return num_entries(self.action_space(None))
+
+    def __deepcopy__(self, memo):
+        warnings.warn(
+            f"Trying to deepcopy {type(self).__name__}, which contains a jumanji env. "
+            "Jumanji envs throw an error when deepcopying, so shallow copy returned.",
+            category=RuntimeWarning,
+            stacklevel=2,
+        )
+        return copy(self)
+
+
+class FlattenObsWrapper(GymnaxEnv):
+    def __init__(self, env):
+        self.env = env
+
+    def __getattribute__(self, name):
+        if name in ["env", "reset", "step", "observation_space", "get_obs"]:
+            return super().__getattribute__(name)
+        return self.env.__getattribute__(name)
+
+    def observation_space(self, params):
+        space = self.env.observation_space(params)
+        size = num_entries(space)
+        return spaces.Box(-jnp.inf, jnp.inf, (size,), dtype=jnp.float32)
+
+    def get_obs(self, state):
+        raise NotImplementedError
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, key, state, action, params):
+        obs, state, reward, done, info = self.env.step(key, state, action, params)
+        obs = flatten_obs(obs)
+        return obs, state, reward, done, info
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, key, params=None):
+        obs, state = self.env.reset(key, params)
+        obs = flatten_obs(obs)
+        return obs, state

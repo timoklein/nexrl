@@ -1,0 +1,29 @@
+env: CartPole-v1
+agent_kwargs:
+  activation: swish
+num_envs: 10
+buffer_size: 50000
+fill_buffer: 5000
+batch_size: 64
+max_grad_norm: 10
+learning_rate: 0.001
+num_epochs: 5
+total_timesteps: 200000
+eval_freq: 2500
+polyak: 0.98
+eps_start: 1
+eps_end: 0.05
+exploration_fraction: 0.5
+gamma: 0.99
+# C51 — CartPole max discounted return ~100
+n_atoms: 51
+v_min: 0
+v_max: 200
+# N-step
+n_step: 3
+# PER
+per_alpha: 0.5
+per_beta_start: 0.4
+per_beta_end: 1.0
+per_eps: 0.000001
+normalize_observations: false

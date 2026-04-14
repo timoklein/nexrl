@@ -1,0 +1,26 @@
+env: Pendulum-v1
+total_timesteps: 131072
+eval_freq: 4096
+buffer_size: 131072
+fill_buffer: 2048
+batch_size: 256
+learning_rate: 0.0003
+critic_learning_rate: 0.0003
+dual_learning_rate: 0.01
+gamma: 0.99
+polyak: 0.995
+num_action_samples: 20
+epsilon: 0.1
+epsilon_mean: 0.001
+epsilon_stddev: 0.000001
+per_dim_constraining: true
+init_log_alpha_mean: 1.0
+init_log_alpha_stddev: 1.0
+normalize_observations: true
+normalize_rewards: true
+actor_kwargs:
+  activation: tanh
+  hidden_layer_sizes: [64, 64]
+critic_kwargs:
+  activation: tanh
+  hidden_layer_sizes: [64, 64]

@@ -1,0 +1,31 @@
+env: CartPole-v1
+agent_kwargs:
+  activation: swish
+  hidden_layer_sizes: [128, 128]
+num_envs: 16
+buffer_size: 50000
+fill_buffer: 500
+batch_size: 128
+num_epochs: 8
+learning_rate: 0.001
+max_grad_norm: 10
+total_timesteps: 500000
+eval_freq: 10000
+gamma: 0.997
+ent_coef: 0.01
+vf_coef: 1.0
+reward_coef: 1.0
+num_simulations: 16
+mcts_policy: muzero
+latent_dim: 64
+unroll_steps: 5
+n_steps: 5
+gradient_scale: 0.5
+# Categorical support (small for CartPole)
+value_min: -10.0
+value_max: 10.0
+value_num_atoms: 21
+reward_min: -2.0
+reward_max: 2.0
+reward_num_atoms: 21
+normalize_observations: false

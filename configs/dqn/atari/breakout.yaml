@@ -1,0 +1,25 @@
+env: atari/Breakout-v5
+agent: DuelingQNetwork
+agent_kwargs:
+  activation: relu
+  hidden_layer_sizes: [512]
+encoder_kwargs:
+  encoder: nature
+  features_dim: 512
+num_envs: 1
+buffer_size: 100000
+fill_buffer: 10000
+batch_size: 32
+max_grad_norm: 10
+learning_rate: 0.0001
+num_epochs: 1
+total_timesteps: 1000000
+eval_freq: 10000
+polyak: 0.99
+target_update_freq: 1000
+eps_start: 1.0
+eps_end: 0.01
+exploration_fraction: 0.1
+gamma: 0.99
+ddqn: true
+normalize_observations: false

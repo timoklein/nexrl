@@ -1,0 +1,88 @@
+# SGF (Simple, Good, Fast) — Battle Zone Atari-100k config
+# Reference: Robine et al., ICLR 2025, Table 7
+env: atari/BattleZone-v5
+agent_kwargs:
+  activation: silu
+  hidden_layer_sizes: [512, 512]
+
+# Collection
+num_envs: 1
+buffer_size: 100000
+fill_buffer: 5000
+batch_size: 1024
+imagination_batch_size: 3072
+
+# Imagination
+imagination_horizon: 10
+
+# Training schedule
+wm_every: 2
+agent_every: 2
+total_timesteps: 100000
+eval_freq: 10000
+
+# Representation optimizer
+repr_learning_rate: 6.0e-4
+repr_weight_decay: 1.0e-3
+repr_warmup_steps: 5000
+repr_grad_clip: 10.0
+
+# Transition optimizer
+transition_learning_rate: 1.2e-3
+transition_weight_decay: 1.0e-3
+transition_warmup_steps: 5000
+transition_grad_clip: 500.0
+
+# Actor-critic optimizer
+ac_learning_rate: 2.4e-6
+ac_grad_clip: 100.0
+
+# RL
+gamma: 0.997
+lambda_gae: 0.95
+
+# VICReg
+consistency_weight: 12.5
+var_weight: 25.0
+cov_weight: 1.0
+
+# Loss scales
+reward_weight: 1.0
+terminal_weight: 1.0
+
+# Actor
+ent_coef: 1.0e-3
+return_norm_decay: 0.99
+return_norm_limit: 1.0
+return_norm_perclo: 5.0
+return_norm_perchi: 95.0
+
+# Critic
+slow_value_rate: 0.02
+slow_value_reg: 1.0
+value_num_bins: 255
+reward_num_bins: 255
+
+# SGF dims
+y_dim: 512
+z_dim: 2048
+projector_hidden: 2048
+predictor_hidden: 2048
+transition_hidden: 1024
+transition_num_hidden: 5
+
+# Augmentation
+shift_pad: 3
+intensity_scale: 0.05
+
+# Action stacking
+action_stack: 4
+
+# Exploration
+env_epsilon: 0.01
+eval_temperature: 0.5
+
+# Standard
+normalize_observations: false
+normalize_rewards: false
+run_evaluation: true

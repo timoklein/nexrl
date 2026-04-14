@@ -1,0 +1,164 @@
+[project]
+name = "nexrl"
+version = "0.1.0"
+description = "Vectorizable RL algorithms in pure JAX"
+authors = [
+    {name = "Timo Klein"},
+]
+dependencies = [
+    "pyyaml>=6.0.2",
+    "flax>=0.9.0",
+    "optax>=0.2.3",
+    "distrax>=0.1.5",
+    "gymnax @ git+https://github.com/RobertTLange/gymnax@main",
+    "jax[cuda12]>=0.4.34",
+    "tyro>=0.9.35",
+    "mctx>=0.0.5",
+    "rlax>=0.1.7",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+keywords = [
+    "machine-learning",
+    "reinforcement-learning",
+    "jax",
+    "vectorization",
+    "hardware-acceleration",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/timoklein/nexrl"
+Repository = "https://github.com/timoklein/nexrl"
+Documentation = "https://github.com/timoklein/nexrl#readme"
+Issues = "https://github.com/timoklein/nexrl/issues"
+Changelog = "https://github.com/timoklein/nexrl/releases"
+
+[project.optional-dependencies]
+# Compatibility wrappers for various RL environments
+compat = [
+    "brax>=0.11.0",
+    "craftax>=1.4.3",
+    "navix>=0.7.0",
+    "jumanji>=1.0.1",
+    "gymnasium>=1.0.0",
+    "kinetix-env>=2.0.0",
+    "ale-py>=0.10.0",
+    "playground>=0.1.0"
+]
+# dm-control requires labmaze which needs Bazel to build — install separately:
+#   pip install dm-control shimmy
+dmc = [
+    "shimmy[dm_control]>=2.0.0",
+    "opencv-python-headless>=4.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pyright>=1.1.390",
+    "pytest>=8.4.2",
+    "ruff>=0.14.2",
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+include = ["src/nexrl"]
+exclude = ["tests", "benchmark", "examples", "src/nexrl/compat"]
+reportMissingTypeStubs = false
+# gymnax/distrax have incomplete stubs
+reportAttributeAccessIssue = "warning"
+reportReturnType = "warning"
+reportArgumentType = "warning"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 127
+include = ["src/**/*.py", "tests/**/*.py"]
+exclude = [
+    "*.egg-info",
+    "__pycache__",
+    ".eggs",
+    ".git",
+    ".venv",
+    "build/",
+    ".ruff_cache",
+    ".mypy_cache",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "C4",
+    "C90",
+    "SIM",
+    "NPY",
+    "RUF",
+]
+ignore = [
+    "E741",
+    "B008",
+    "B023",
+    "B028",
+    "B905",
+    "F722",
+    "F821",
+    "RUF013",
+]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/**/*.py" = ["N802", "N803", "N806"]
+"src/nexrl/networks/*.py" = ["N803", "N806"]
+"src/nexrl/algos/*.py" = ["N803", "N806", "C901", "SIM108"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["nexrl"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::pytest.PytestCollectionWarning",
+]
+markers = [
+    "slow: marks tests as slow (model-based algorithms)",
+]

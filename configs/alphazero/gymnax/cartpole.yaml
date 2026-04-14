@@ -1,0 +1,19 @@
+env: CartPole-v1
+agent_kwargs:
+  activation: swish
+  hidden_layer_sizes: [64, 64]
+num_envs: 10
+buffer_size: 10000
+fill_buffer: 200
+batch_size: 64
+num_epochs: 4
+learning_rate: 0.0005
+max_grad_norm: 10
+total_timesteps: 100000
+eval_freq: 5000
+gamma: 0.99
+ent_coef: 0.01
+vf_coef: 1.0
+num_simulations: 32
+mcts_policy: muzero
+normalize_observations: false
