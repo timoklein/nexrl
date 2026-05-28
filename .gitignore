@@ -34,3 +34,4 @@ venv/
 
 # large files
 data/
+logs/

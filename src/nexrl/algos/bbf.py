@@ -41,6 +41,7 @@ from jax import numpy as jnp
 
 from nexrl.algos.utils import (
     _polyak_update,
+    create_encoder,
     create_env,
     create_vec_env_fns,
     make_eval_act,
@@ -195,23 +196,6 @@ def _build_sp_mask(params: nnx.State) -> nnx.State:
     )
 
 
-def _generate_random_params(params: nnx.State, rng: jax.Array) -> nnx.State:
-    """Generate random params matching shapes/dtypes of existing params."""
-    leaves, treedef = jax.tree.flatten(params)
-    keys = jax.random.split(rng, len(leaves))
-
-    def _random_leaf(key, leaf):
-        if leaf.ndim >= 2:
-            fan_in = leaf.shape[0]
-            std = 1.0 / jnp.sqrt(jnp.float32(fan_in))
-            return jax.random.normal(key, leaf.shape, leaf.dtype) * std
-        else:
-            return jnp.zeros_like(leaf)
-
-    random_leaves = [_random_leaf(k, l) for k, l in zip(keys, leaves)]
-    return treedef.unflatten(random_leaves)
-
-
 # ---------------------------------------------------------------------------
 # Network creation
 # ---------------------------------------------------------------------------
@@ -219,8 +203,17 @@ def _generate_random_params(params: nnx.State, rng: jax.Array) -> nnx.State:
 
 def _create_networks(
     config: BBFConfig, env: GymnaxEnv, env_params: EnvParams, rng: jax.Array
-) -> tuple[BBFNetwork, nnx.Optimizer, BBFNetwork]:
-    """Create BBF online network, optimizer, and target network."""
+) -> tuple[BBFNetwork, nnx.Optimizer, BBFNetwork, Callable[[jax.Array], nnx.State]]:
+    """Create BBF online network, optimizer, target network, and a fresh-params factory.
+
+    The returned ``make_fresh_params(reset_rng)`` constructs a throwaway
+    ``BBFNetwork`` with a fresh ``nnx.Rngs`` and returns its ``nnx.Param`` state.
+    It is the shrink-and-perturb random source — draws come from the network's
+    actual initializers (Conv/Dense kernel inits, biases, layer scales), matching
+    Schwarzer's ``network_def.init(...)`` rather than a hand-rolled fan-in
+    heuristic. Closes a subtle fidelity gap inside the most important BBF
+    mechanism.
+    """
     action_dim = env.action_space(env_params).n
     obs_space = env.observation_space(env_params)
 
@@ -230,23 +223,29 @@ def _create_networks(
 
     if config.encoder_kwargs is not None:
         features_dim = config.encoder_kwargs.features_dim
-        from nexrl.algos.utils import create_encoder
-
-        # return_spatial=True: encoder outputs the (B, Hs, Ws, Cs) latent so the
-        # convolutional SPR transition can operate on it; BBFNetwork owns the
-        # shared projection.
-        encoder = create_encoder(
-            config.encoder_kwargs, obs_space.shape, rngs, compute_dtype=compute_dtype, return_spatial=True
-        )
-        encoder_t = create_encoder(
-            config.encoder_kwargs, obs_space.shape, rngs, compute_dtype=compute_dtype, return_spatial=True
-        )
         in_features = 0
     else:
         features_dim = config.hidden_dim
-        encoder = None
-        encoder_t = None
         in_features = int(np.prod(obs_space.shape))
+
+    # Single source of truth for encoder construction — used both at training
+    # start (for `network` / `target`) and inside `make_fresh_params` (for each
+    # reset's random draw). `return_spatial=True`: encoder outputs the spatial
+    # latent so the convolutional SPR transition can operate on it; BBFNetwork
+    # owns the shared projection.
+    def _make_encoder(encoder_rngs: nnx.Rngs) -> Any:
+        if config.encoder_kwargs is None:
+            return None
+        return create_encoder(
+            config.encoder_kwargs,
+            obs_space.shape,
+            encoder_rngs,
+            compute_dtype=compute_dtype,
+            return_spatial=True,
+        )
+
+    encoder = _make_encoder(rngs)
+    encoder_t = _make_encoder(rngs)
 
     net_kwargs = {
         "action_dim": action_dim,
@@ -278,7 +277,26 @@ def _create_networks(
     )
     optimizer = nnx.Optimizer(network, tx, wrt=nnx.Param)
 
-    return network, optimizer, target
+    def make_fresh_params(reset_rng: jax.Array) -> nnx.State:
+        """Construct a fresh BBFNetwork and return its ``nnx.Param`` state.
+
+        Drawn from the same init path used by `_create_networks` above, so the
+        random component of shrink-and-perturb is distributed identically to the
+        network's original initialization (kernel inits, bias inits, layer scales).
+        Called from Python (not under JIT) — module construction stays in eager
+        land; the resulting state is then fed into the jitted reset as data.
+        """
+        fresh_rngs = nnx.Rngs(reset_rng)
+        fresh_encoder = _make_encoder(fresh_rngs)
+        fresh_net = BBFNetwork(
+            **net_kwargs,
+            encoder=fresh_encoder,
+            rngs=fresh_rngs,
+            compute_dtype=compute_dtype,
+        )
+        return nnx.state(fresh_net, nnx.Param)
+
+    return network, optimizer, target, make_fresh_params
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +347,7 @@ def train_bbf(
     vmap_step, vmap_reset = create_vec_env_fns(env, config)
 
     rngs = nnx.Rngs(rng)
-    network, optimizer, target = _create_networks(config, env, env_params, rngs())
+    network, optimizer, target, make_fresh_params = _create_networks(config, env, env_params, rngs())
 
     obs, env_state = vmap_reset(jax.random.split(rngs(), num_envs), env_params)
 
@@ -548,14 +566,19 @@ def train_bbf(
 
     # -----------------------------------------------------------------------
     # JIT'd shrink-and-perturb reset
+    #
+    # `fresh` and `fresh_target` are drawn in Python by `make_fresh_params`
+    # before this call (see the outer-loop reset trigger). Drawing outside the
+    # jit lets the fresh state come from a real BBFNetwork construction (real
+    # initializers) rather than a fan-in heuristic; the jit body then only does
+    # the shrink-and-perturb arithmetic and the optimizer-moment surgery.
     # -----------------------------------------------------------------------
     @nnx.jit
-    def jit_reset(q_net, q_opt, q_tgt, carry, rngs):
+    def jit_reset(q_net, q_opt, q_tgt, carry, fresh, fresh_target):
         # --- Online net: shrink-and-perturb. Encoder/transition (sp_mask==1) keep
         # `shrink*old + perturb*random`; head/projection/predictor (sp_mask==0) are
         # fully re-initialised to `random`. ---
         params = nnx.state(q_net, nnx.Param)
-        fresh = _generate_random_params(params, rngs())
 
         new_params = jax.tree.map(
             lambda m, old, new: m * (config.shrink_factor * old + config.perturb_factor * new) + (1.0 - m) * new,
@@ -588,12 +611,12 @@ def train_bbf(
 
         # --- Deviation #11: independent target re-initialisation (not a hard copy
         # of the online net). The target undergoes its OWN shrink-and-perturb on its
-        # current EMA params, using a SEPARATE random draw (`rngs()` advances, so
-        # `fresh_target` differs from the online `fresh`). Same sp_mask split:
-        # encoder/transition keep `shrink*target_old + perturb*target_random`, the
-        # rest take the target's own random init — a different init than online. ---
+        # current EMA params, using a SEPARATE random draw — `fresh_target` was
+        # drawn from an independent rngs() advance in the Python outer loop, so it
+        # differs from the online `fresh`. Same sp_mask split: encoder/transition
+        # keep `shrink*target_old + perturb*target_random`, the rest take the
+        # target's own random init — a different init than online. ---
         target_params = nnx.state(q_tgt, nnx.Param)
-        fresh_target = _generate_random_params(target_params, rngs())
         new_target_params = jax.tree.map(
             lambda m, old, new: m * (config.shrink_factor * old + config.perturb_factor * new) + (1.0 - m) * new,
             sp_mask,
@@ -661,7 +684,13 @@ def train_bbf(
 
             # --- Periodic shrink-and-perturb reset (env-step semantics) ---
             if config.reset_every > 0 and env_steps_collected >= next_reset_at and next_reset_at <= config.no_resets_after:
-                carry = jit_reset(network, optimizer, target, carry, rngs)
+                # Draw the random component of S&P outside JIT — eager construction
+                # of a fresh BBFNetwork lets us re-use the network's real init path
+                # (kernel inits, biases) rather than a fan-in heuristic. Independent
+                # `rngs()` advances for online and target yield independent draws.
+                fresh = make_fresh_params(rngs())
+                fresh_target = make_fresh_params(rngs())
+                carry = jit_reset(network, optimizer, target, carry, fresh, fresh_target)
                 next_reset_at += config.reset_every
 
         # --- Periodic evaluation ---
