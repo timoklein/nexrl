@@ -55,8 +55,18 @@ def main(
     key = jax.random.PRNGKey(seed_id)
     keys = jax.random.split(key, num_seeds)
 
-    vmap_train = jax.jit(jax.vmap(train_fn, in_axes=(None, 0)), static_argnums=(0,))
-    state, metrics = vmap_train(config, keys)
+    # BBF uses a Python-level eval loop (nnx.jit per period) — can't be
+    # wrapped in jax.jit(jax.vmap(...)) because that would unroll the loop.
+    _PYTHON_LOOP_ALGOS = {"bbf"}
+    if algo_str in _PYTHON_LOOP_ALGOS:
+        all_metrics = []
+        for i in range(num_seeds):
+            state, m = train_fn(config, keys[i])
+            all_metrics.append(m)
+        metrics = jax.tree.map(lambda *args: jnp.stack(args), *all_metrics)
+    else:
+        vmap_train = jax.jit(jax.vmap(train_fn, in_axes=(None, 0)), static_argnums=(0,))
+        state, metrics = vmap_train(config, keys)
     returns = metrics["eval_returns"]
     returns.block_until_ready()
 

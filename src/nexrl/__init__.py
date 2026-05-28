@@ -1,5 +1,6 @@
 from nexrl.algos import (
     train_alphazero,
+    train_bbf,
     train_dqn,
     train_dreamer,
     train_drqv2,
@@ -27,6 +28,7 @@ from nexrl.algos import (
 from nexrl.configs import (
     ALGO_CONFIG_MAP,
     AlphaZeroConfig,
+    BBFConfig,
     DQNConfig,
     DreamerConfig,
     DrQV2Config,
@@ -57,6 +59,7 @@ from nexrl.types import Metrics, TrainFn
 
 _train_fns: dict[str, TrainFn] = {
     "alphazero": train_alphazero,
+    "bbf": train_bbf,
     "dreamer": train_dreamer,
     "drqv2": train_drqv2,
     "muzero": train_muzero,
@@ -91,6 +94,7 @@ def get_train_fn(algo: str) -> TrainFn:
 __all__ = [
     "ALGO_CONFIG_MAP",
     "AlphaZeroConfig",
+    "BBFConfig",
     "DQNConfig",
     "DrQV2Config",
     "DreamerConfig",
@@ -118,6 +122,7 @@ __all__ = [
     "VMPOConfig",
     "get_train_fn",
     "train_alphazero",
+    "train_bbf",
     "train_dqn",
     "train_dreamer",
     "train_drqv2",

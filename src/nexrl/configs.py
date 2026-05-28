@@ -24,6 +24,7 @@ class CNNConfig:
 
     encoder: str = "nature"  # "nature" or "impala"
     features_dim: int = 512  # 512 for nature, 256 for impala
+    width_scale: int = 1  # channel multiplier for IMPALA encoder
 
 
 def _dict_to_dataclass(cls: type, d: dict[str, Any]) -> Any:
@@ -388,6 +389,84 @@ class RainbowConfig(_BaseConfig):
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
     run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class BBFConfig(_BaseConfig):
+    """BBF — Bigger, Better, Faster (Schwarzer et al., ICML 2023).
+
+    Builds on Rainbow (C51 + PER + dueling + double DQN) with SPR auxiliary loss,
+    scaled IMPALA encoder, periodic shrink-and-perturb resets, receding n-step/gamma
+    annealing, EMA target network, and AdamW weight decay.
+    """
+
+    env: str = "atari/Breakout-v5"
+    # Collection
+    num_envs: int = 1
+    buffer_size: int = 200_000
+    fill_buffer: int = 2_000
+    batch_size: int = 32
+    num_epochs: int = 8  # replay ratio = num_epochs * num_envs
+    total_timesteps: int = 100_000
+    eval_freq: int = 10_000
+    # C51
+    n_atoms: int = 51
+    v_min: float = -10.0
+    v_max: float = 10.0
+    # N-step annealing (per-cycle: max_n_step -> n_step over cycle_steps grad steps)
+    n_step: int = 3
+    max_n_step: int = 10
+    # Gamma annealing (per-cycle: min_gamma -> gamma)
+    gamma: float = 0.997
+    min_gamma: float = 0.97
+    # Reset schedule
+    cycle_steps: int = 10_000
+    reset_every: int = 20_000
+    no_resets_after: int = 100_000
+    # Shrink-and-perturb
+    shrink_factor: float = 0.5
+    perturb_factor: float = 0.5
+    # SPR
+    spr_weight: float = 5.0
+    jumps: int = 5
+    # Network — hidden_dim is the encoder output / SPR projection dim. It is
+    # used as features_dim when no CNN encoder is configured (testing path).
+    hidden_dim: int = 2048
+    # Mixed precision: "bfloat16" or "float32". Params (master weights, optimizer
+    # state, LayerNorm, softmax/log_softmax, SPR norms, Polyak EMA) stay fp32;
+    # only conv/linear forward passes run in compute_dtype.
+    compute_dtype: str = "bfloat16"
+    # Optimizer
+    learning_rate: float = 1e-4
+    weight_decay: float = 0.1
+    max_grad_norm: float = 10.0
+    # Target network
+    target_update_tau: float = 0.005
+    target_action_selection: bool = True
+    # Exploration
+    epsilon_train: float = 0.0
+    epsilon_eval: float = 0.001
+    epsilon_decay_period: int = 2_000
+    # Augmentation
+    data_augmentation: bool = True
+    shift_pad: int = 4
+    # Reward clipping to [-1, 1] for the TRAINING signal (buffer/targets), matching
+    # Schwarzer's runner. train_return is reported on the RAW reward (the reference
+    # reports unclipped cum_reward), so the metric stays the true game score.
+    clip_rewards: bool = True
+    # PER
+    per_alpha: float = 0.5
+    per_beta: float = 0.5
+    per_eps: float = 1e-6
+    # Standard
+    normalize_observations: bool = False
+    normalize_rewards: bool = False
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+    # CNN encoder
+    encoder_kwargs: CNNConfig | None = dataclasses.field(
+        default_factory=lambda: CNNConfig(encoder="impala", features_dim=2048, width_scale=4)
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -819,6 +898,7 @@ class DrQV2Config(_BaseConfig):
 
 ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "alphazero": AlphaZeroConfig,
+    "bbf": BBFConfig,
     "dreamer": DreamerConfig,
     "drqv2": DrQV2Config,
     "mrq": MrQConfig,

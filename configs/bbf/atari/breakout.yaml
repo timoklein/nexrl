@@ -1,0 +1,63 @@
+env: atari/Breakout-v5
+num_envs: 4
+buffer_size: 200000
+fill_buffer: 2000
+batch_size: 32
+# num_epochs scaled with num_envs to keep RR=8 grad-steps per env-step
+# (8 grad updates per env step * 4 env steps per outer iter = 32)
+num_epochs: 32
+total_timesteps: 100000
+eval_freq: 10000
+# C51
+n_atoms: 51
+v_min: -10.0
+v_max: 10.0
+# N-step annealing
+n_step: 3
+max_n_step: 10
+# Gamma annealing
+gamma: 0.997
+min_gamma: 0.97
+# Reset schedule
+cycle_steps: 10000
+reset_every: 20000
+no_resets_after: 100000
+# Shrink-and-perturb
+shrink_factor: 0.5
+perturb_factor: 0.5
+# SPR
+spr_weight: 5.0
+jumps: 5
+# Network — encoder output dim (= SPR projection dim, matches reference hidden_dim=2048)
+hidden_dim: 2048
+# Mixed precision: bfloat16 for matmul/conv, fp32 for LN/softmax/SPR-norms.
+compute_dtype: bfloat16
+# Optimizer
+learning_rate: 1.0e-4
+weight_decay: 0.1
+max_grad_norm: 10.0
+# Target
+target_update_tau: 0.005
+target_action_selection: true
+# Exploration
+epsilon_train: 0.0
+epsilon_eval: 0.001
+epsilon_decay_period: 2000
+# Augmentation
+data_augmentation: true
+shift_pad: 4
+# Reward clipping to [-1,1] for training (buffer/targets); train_return stays raw
+clip_rewards: true
+# PER
+per_alpha: 0.5
+per_beta: 0.5
+per_eps: 1.0e-6
+# Standard
+normalize_observations: false
+normalize_rewards: false
+run_evaluation: true
+# Encoder
+encoder_kwargs:
+  encoder: impala
+  features_dim: 2048
+  width_scale: 4

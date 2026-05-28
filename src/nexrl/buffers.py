@@ -96,11 +96,11 @@ class PrioritizedReplayBuffer(CircularBuffer):
         action_space: spaces.Discrete | spaces.Box,
     ) -> "PrioritizedReplayBuffer":
         data = Minibatch(
-            obs=jnp.empty((size, *obs_space.shape)).astype(obs_space.dtype),
-            action=jnp.empty((size, *action_space.shape)).astype(action_space.dtype),
-            reward=jnp.empty(size),
-            done=jnp.empty(size).astype(bool),
-            next_obs=jnp.empty((size, *obs_space.shape)).astype(obs_space.dtype),
+            obs=jnp.empty((size, *obs_space.shape), dtype=obs_space.dtype),
+            action=jnp.empty((size, *action_space.shape), dtype=action_space.dtype),
+            reward=jnp.empty(size, dtype=jnp.float32),
+            done=jnp.empty(size, dtype=bool),
+            next_obs=jnp.empty((size, *obs_space.shape), dtype=obs_space.dtype),
         )
         return cls(size=size, data=data, index=0, full=False, priorities=jnp.ones(size, dtype=jnp.float32))
 
@@ -150,6 +150,81 @@ class PrioritizedReplayBuffer(CircularBuffer):
         return self.replace(priorities=self.priorities.at[indices].set(new_priorities))
 
 
+class BBFReplayBuffer(PrioritizedReplayBuffer):
+    """Prioritized replay buffer with subsequence sampling for BBF/SPR.
+
+    Stores single-step transitions interleaved by environment:
+    ``[env0_t0, env1_t0, ..., envN_t0, env0_t1, ...]`` (set ``stride=num_envs``
+    when sampling so subsequences come from the same env).
+    """
+
+    @partial(jax.jit, static_argnames=("num", "subseq_len", "stride"))
+    def sample_with_subsequences(
+        self,
+        num: int,
+        rng: chex.PRNGKey,
+        beta: float,
+        subseq_len: int,
+        stride: int = 1,
+    ) -> tuple["Minibatch", chex.Array, chex.Array, chex.Array]:
+        """PER sample with contiguous-in-time subsequence fetch.
+
+        For each sampled index i, fetches transitions at i, i+stride,
+        i+2*stride, ..., i+(subseq_len-1)*stride. With ``stride=num_envs`` and
+        the env-interleaved layout above, those are consecutive timesteps of
+        the same env.
+
+        Args:
+            num: Batch size.
+            rng: PRNG key.
+            beta: PER importance sampling exponent.
+            subseq_len: Number of consecutive transitions (per env) per sample.
+            stride: Index stride between successive subsequence entries.
+                Use ``num_envs`` for the env-interleaved layout.
+
+        Returns:
+            subseq_mb: Subsequence data with shape (num, subseq_len, ...).
+            same_traj_mask: (num, subseq_len) — 1.0 if same episode, 0.0 after boundary.
+            indices: (num,) sampled PER base indices.
+            weights: (num,) PER importance sampling weights.
+        """
+        n = self.num_entries
+        valid_mask = jnp.arange(self.size) < n
+        # Restrict to indices where a full strided subsequence fits before write pointer
+        safe_upper = jnp.maximum(n - subseq_len * stride, 1)
+        subseq_mask = jnp.arange(self.size) < safe_upper
+        probs = self.priorities * valid_mask * subseq_mask
+        total = probs.sum()
+        probs_norm = probs / jnp.maximum(total, 1e-8)
+
+        # Stratified PER sampling
+        cumsum = jnp.cumsum(probs_norm)
+        segment_size = 1.0 / num
+        offsets = jnp.arange(num, dtype=jnp.float32) * segment_size
+        u = jax.random.uniform(rng, (num,), minval=0.0, maxval=segment_size)
+        sample_points = offsets + u
+        indices = jnp.searchsorted(cumsum, sample_points)
+        indices = jnp.clip(indices, 0, safe_upper - 1)
+
+        # IS weights
+        sampled_probs = jnp.maximum(probs_norm[indices], 1e-8)
+        weights = (n * sampled_probs) ** (-beta)
+        weights = weights / jnp.maximum(weights.max(), 1e-8)
+
+        # Fetch subsequences strided by `stride` so each subseq lives on one env
+        subseq_offsets = jnp.arange(subseq_len) * stride
+        subseq_indices = (indices[:, None] + subseq_offsets[None, :]) % self.size  # (num, subseq_len)
+        subseq_mb = jax.tree.map(lambda arr: arr[subseq_indices], self.data)
+
+        # same_trajectory mask: entry k is valid iff no done flag at entries 0..k-1
+        dones_float = subseq_mb.done.astype(jnp.float32)  # (num, subseq_len)
+        cum_done = jnp.cumsum(dones_float, axis=1)
+        shifted = jnp.concatenate([jnp.zeros((num, 1), dtype=jnp.float32), cum_done[:, :-1]], axis=1)
+        same_traj_mask = (shifted == 0).astype(jnp.float32)  # (num, subseq_len)
+
+        return subseq_mb, same_traj_mask, indices, weights
+
+
 class ReplayBuffer(CircularBuffer):
     """
     Circular buffer for storing transitions. Implements appending and sampling
@@ -177,11 +252,11 @@ class ReplayBuffer(CircularBuffer):
         """
         # Skip checking sizes as we know they are correct here
         data = Minibatch(
-            obs=jnp.empty((size, *obs_space.shape)).astype(obs_space.dtype),
-            action=jnp.empty((size, *action_space.shape)).astype(action_space.dtype),
-            reward=jnp.empty(size),
-            done=jnp.empty(size).astype(bool),
-            next_obs=jnp.empty((size, *obs_space.shape)).astype(obs_space.dtype),
+            obs=jnp.empty((size, *obs_space.shape), dtype=obs_space.dtype),
+            action=jnp.empty((size, *action_space.shape), dtype=action_space.dtype),
+            reward=jnp.empty(size, dtype=jnp.float32),
+            done=jnp.empty(size, dtype=bool),
+            next_obs=jnp.empty((size, *obs_space.shape), dtype=obs_space.dtype),
         )
         return cls(size=size, data=data, index=0, full=False)
 

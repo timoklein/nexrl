@@ -268,6 +268,18 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         info_sd = {}
         return obs_sd, idx_sd, reward_sd, done_sd, info_sd
 
+    def step(self, key, state, action, params=None):
+        """Override gymnax base step to avoid calling reset_env every step.
+
+        The base class computes both step_env and reset_env on every call
+        (safe for pure-JAX envs), but with pure_callback the reset is a
+        destructive side-effect that wipes the gymnasium env state.
+        Autoreset already handles episode boundaries at the gymnasium level.
+        """
+        if params is None:
+            params = self.default_params
+        return self.step_env(key, state, action, params)
+
     def step_env(self, key, state, action, params):
         def step(env_idx, action):
             return _step_multi_instance(self.envs, env_idx, action)
@@ -281,13 +293,43 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         )
 
     def reset_env(self, key, params):
+        # WARNING: a pure_callback cannot recover its own vmap-lane index, so this
+        # base reset hardcodes instance 0. Under `jax.vmap(env.reset)` EVERY lane
+        # therefore aliases instance 0 and `step_env` (which routes via env_idx)
+        # steps a single instance for all lanes — corrupting transitions whenever
+        # num_envs>1. Correct multi-env use goes through `reset_with_id` (wired in
+        # `create_vec_env_fns`), which binds each lane to its own instance. This
+        # path stays correct only for num_envs==1.
         def reset(env_idx, seed):
             return _reset_multi_instance(self.envs, env_idx, seed)
 
-        # Use key to generate a seed, and assign env_idx from the key
         seed = jax.random.randint(key, (), 0, 2**16)
-        # env_idx is determined by the calling context (vmap index)
         env_idx = jnp.int32(0)
+        return jax.pure_callback(
+            reset,
+            self.reset_shape_dtype,
+            vmap_method="sequential",
+            env_idx=env_idx,
+            seed=seed,
+        )
+
+    def reset_with_id(self, key, env_idx, params=None):
+        """Reset a SPECIFIC instance ``env_idx`` and bind this lane to it.
+
+        Vmap this over ``(keys, env_ids=arange(num_envs))`` so each lane resets and
+        is permanently bound to its own gymnasium instance. This is the fix for the
+        aliasing bug described in ``reset_env``: instead of a hardcoded 0, the
+        per-lane ``env_idx`` flows into the callback (it IS a vmapped argument here),
+        so lane ``i`` resets instance ``i`` and returns ``i`` as its state.
+        ``step_env`` already routes via ``env_idx=state``, keeping the binding.
+        ``params`` is accepted (and ignored) only to match the vmap signature.
+        """
+        del params
+
+        def reset(env_idx, seed):
+            return _reset_multi_instance(self.envs, env_idx, seed)
+
+        seed = jax.random.randint(key, (), 0, 2**16)
         return jax.pure_callback(
             reset,
             self.reset_shape_dtype,
@@ -328,6 +370,13 @@ def create_atari(env_name, *, num_envs: int = 1, **kwargs):
     Observation: (4, 84, 84) uint8 (grayscale, frame-stacked).
     """
     import ale_py  # noqa: F401
+
+    # Atari-100k convention (and Schwarzer's BBF gin: sticky_actions=False): disable
+    # sticky actions. ALE v5 defaults repeat_action_probability=0.25; override to 0.
+    # Caller-supplied kwargs win. terminal_on_life_loss is intentionally NOT enabled
+    # here yet — it needs the reported return decoupled from the per-life terminal
+    # (tracked as a follow-up).
+    kwargs.setdefault("repeat_action_probability", 0.0)
 
     def make_fn():
         env = gym.make(f"ALE/{env_name}", frameskip=1, **kwargs)

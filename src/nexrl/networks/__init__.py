@@ -15,6 +15,9 @@ from nexrl.networks.base import (
 from nexrl.networks.base import (
     FrozenParam as FrozenParam,
 )
+from nexrl.networks.bbf import (
+    BBFNetwork as BBFNetwork,
+)
 from nexrl.networks.dreamer import (
     RSSM as RSSM,
 )

@@ -80,6 +80,23 @@ def create_vec_env_fns(env: GymnaxEnv, config: Any) -> tuple[Any, Any]:
     vmap_reset = jax.vmap(env.reset, in_axes=(0, None))
     vmap_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
 
+    # Multi-instance envs (Atari/DMC) hold N independent gymnasium instances and
+    # carry each lane's state as an integer env_idx. Their base reset can't recover
+    # its vmap lane inside a pure_callback, so it hardcodes instance 0 — aliasing
+    # every lane to one instance and corrupting transitions for num_envs>1. Route
+    # reset through `reset_with_id`, mapping over an explicit per-lane env_idx, so
+    # each lane binds to its own instance. step already routes via env_idx=state.
+    reset_with_id = getattr(env, "reset_with_id", None)
+    if reset_with_id is not None:
+        # reset_with_id is a bound method of MultiInstanceGymnasium2GymnaxEnv; its
+        # __self__ is the env, which knows how many instances it holds.
+        env_ids = jnp.arange(reset_with_id.__self__._num_envs, dtype=jnp.int32)
+
+        def vmap_reset_multi(rngs_B, params):
+            return jax.vmap(reset_with_id, in_axes=(0, 0, None))(rngs_B, env_ids, params)
+
+        return vmap_step, vmap_reset_multi
+
     is_craftax = isinstance(config.env, str) and config.env.startswith("craftax/")
     if not is_craftax:
         return vmap_step, vmap_reset
@@ -229,7 +246,12 @@ def create_env(
 
 
 def create_encoder(
-    encoder_config: CNNConfig, obs_shape: tuple[int, ...], rngs: nnx.Rngs
+    encoder_config: CNNConfig,
+    obs_shape: tuple[int, ...],
+    rngs: nnx.Rngs,
+    *,
+    compute_dtype: jnp.dtype = jnp.float32,
+    return_spatial: bool = False,
 ) -> NatureCNNEncoder | ImpalaCNNEncoder:
     """Create CNN encoder from CNNConfig.
 
@@ -237,15 +259,33 @@ def create_encoder(
         encoder_config: CNN encoder configuration.
         obs_shape: Observation shape in NCHW format (channels, height, width).
         rngs: NNX RNG container.
+        compute_dtype: Forward-pass dtype (e.g. jnp.bfloat16). Master weights
+            remain fp32. Defaults to fp32 to preserve behavior for non-BBF callers.
+        return_spatial: If True (IMPALA only), return the (B, H', W', C) spatial
+            latent instead of flat features (BBF convolutional SPR path).
     """
     in_channels, height, width = obs_shape[0], obs_shape[1], obs_shape[2]
     if encoder_config.encoder == "nature":
+        if return_spatial:
+            raise ValueError("return_spatial is only supported for the IMPALA encoder.")
         return NatureCNNEncoder(
-            in_channels=in_channels, height=height, width=width, features_dim=encoder_config.features_dim, rngs=rngs
+            in_channels=in_channels,
+            height=height,
+            width=width,
+            features_dim=encoder_config.features_dim,
+            rngs=rngs,
+            compute_dtype=compute_dtype,
         )
     elif encoder_config.encoder == "impala":
         return ImpalaCNNEncoder(
-            in_channels=in_channels, height=height, width=width, features_dim=encoder_config.features_dim, rngs=rngs
+            in_channels=in_channels,
+            height=height,
+            width=width,
+            features_dim=encoder_config.features_dim,
+            rngs=rngs,
+            width_scale=encoder_config.width_scale,
+            compute_dtype=compute_dtype,
+            return_spatial=return_spatial,
         )
     else:
         raise ValueError(f"Unknown encoder: {encoder_config.encoder!r}. Expected 'nature' or 'impala'.")

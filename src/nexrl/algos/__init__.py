@@ -9,6 +9,7 @@ Off-policy visual: drqv2
 """
 
 from .alphazero import train_alphazero
+from .bbf import train_bbf
 from .dqn import train_dqn
 from .dreamer import train_dreamer
 from .drqv2 import train_drqv2
@@ -36,6 +37,7 @@ from .vmpo_continuous import train_vmpo_continuous
 
 __all__ = [
     "train_alphazero",
+    "train_bbf",
     "train_dqn",
     "train_dreamer",
     "train_drqv2",
