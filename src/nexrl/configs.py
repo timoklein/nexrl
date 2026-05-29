@@ -463,6 +463,12 @@ class BBFConfig(_BaseConfig):
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
     run_evaluation: bool = False
+    # When True, run the (expensive, sequential-Atari) 128-episode evaluation ONLY at
+    # the final eval point instead of at every eval_freq boundary. The train_return
+    # curve is still logged at every eval point; intermediate eval arrays are zeros.
+    # Eval consumes RNG only at the final point, so training dynamics are identical to
+    # a run with run_evaluation=False up to the last step.
+    final_eval_only: bool = False
     # CNN encoder
     encoder_kwargs: CNNConfig | None = dataclasses.field(
         default_factory=lambda: CNNConfig(encoder="impala", features_dim=2048, width_scale=4)

@@ -695,7 +695,11 @@ def train_bbf(
 
         # --- Periodic evaluation ---
         if (step + 1) % eval_period == 0:
-            if config.run_evaluation:
+            # `final_eval_only` runs the costly 128-episode Atari eval just once, at the
+            # last eval point; the train_return curve is still logged every eval_period.
+            is_final_eval = (step + 1) == total_env_steps
+            do_eval = config.run_evaluation and (not config.final_eval_only or is_final_eval)
+            if do_eval:
                 eval_lengths, eval_returns = run_eval(network, rngs)
             else:
                 eval_lengths = jnp.zeros(128, dtype=jnp.float32)
