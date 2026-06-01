@@ -450,6 +450,10 @@ class BBFConfig(_BaseConfig):
     # Augmentation
     data_augmentation: bool = True
     shift_pad: int = 4
+    # Terminal-on-life-loss (Atari): the agent sees a per-life terminal (n-step cut at
+    # life boundaries) while the game continues across lives and train_return/eval stay
+    # full-game. Matches Schwarzer's BBF runner. Off by default for non-Breakout configs.
+    terminal_on_life_loss: bool = False
     # Reward clipping to [-1, 1] for the TRAINING signal (buffer/targets), matching
     # Schwarzer's runner. train_return is reported on the RAW reward (the reference
     # reports unclipped cum_reward), so the metric stays the true game score.

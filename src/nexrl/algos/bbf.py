@@ -392,7 +392,14 @@ def train_bbf(
         actions = jax.lax.cond(uniform, sample_uniform, sample_policy, rng_action)
 
         rng_steps = jax.random.split(rngs(), num_envs)
-        next_obs, new_env_state, rewards, dones, _ = vmap_step(rng_steps, carry.env_state, actions, env_params)
+        next_obs, new_env_state, rewards, dones, info = vmap_step(rng_steps, carry.env_state, actions, env_params)
+
+        # With terminal_on_life_loss, `dones` is the AGENT terminal (fires per life)
+        # and `info['real_done']` is the true GAME boundary (game over only). The
+        # buffer/n-step use `dones` (bootstrap cut at each life), while the reported
+        # full-game train_return resets/accumulates on `real_dones`. Without the wrapper
+        # the env sets real_done == done, so this is a no-op for other Atari configs.
+        real_dones = info.get("real_done", dones)
 
         # Reward clipping for the TRAINING signal only (matches Schwarzer's runner,
         # which clips the agent/buffer reward to [-1, 1]). running_return below uses
@@ -402,9 +409,9 @@ def train_bbf(
         train_rewards = jnp.clip(rewards, -1.0, 1.0) if config.clip_rewards else rewards
 
         new_running_B = carry.running_return + rewards  # RAW reward for the reported metric
-        completed_sum = carry.completed_returns_sum + jnp.sum(new_running_B * dones)
-        completed_count = carry.completed_returns_count + jnp.sum(dones.astype(jnp.int32))
-        reset_running_B = new_running_B * (1 - dones)
+        completed_sum = carry.completed_returns_sum + jnp.sum(new_running_B * real_dones)
+        completed_count = carry.completed_returns_count + jnp.sum(real_dones.astype(jnp.int32))
+        reset_running_B = new_running_B * (1 - real_dones)
 
         mb = Minibatch(
             obs=carry.last_obs,

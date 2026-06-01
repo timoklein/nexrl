@@ -46,6 +46,9 @@ epsilon_decay_period: 2000
 # Augmentation
 data_augmentation: true
 shift_pad: 4
+# Terminal-on-life-loss (Schwarzer's BBF runner): per-life agent terminal, game
+# continues across lives, train_return/eval stay full-game.
+terminal_on_life_loss: true
 # Reward clipping to [-1,1] for training (buffer/targets); train_return stays raw
 clip_rewards: true
 # PER

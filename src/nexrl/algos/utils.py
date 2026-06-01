@@ -233,7 +233,12 @@ def create_env(
     has_encoder = getattr(config, "encoder_kwargs", None) is not None
     if env is None:
         if isinstance(config.env, str):
-            env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1))
+            # terminal_on_life_loss is Atari-only (BBF); pass it through only when set
+            # so non-Atari envs (which would reject the kwarg) are never handed it.
+            extra_env_kwargs = {}
+            if getattr(config, "terminal_on_life_loss", False):
+                extra_env_kwargs["terminal_on_life_loss"] = True
+            env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1), **extra_env_kwargs)
         else:
             env = config.env
             env_params = getattr(config, "env_params", None) or env.default_params  # type: ignore[union-attr]

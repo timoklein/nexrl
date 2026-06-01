@@ -111,18 +111,24 @@ def _evaluate_multi_lane(
     def step(s: _MultiLaneState) -> _MultiLaneState:
         rng, rng_act, rng_step = jax.random.split(s.rng, 3)
         action = act(s.last_obs, rng_act)
-        obs, env_state, reward, done, _ = env.step(rng_step, s.env_state, action, env_params)
+        obs, env_state, reward, done, info = env.step(rng_step, s.env_state, action, env_params)
 
         cur_return = s.cur_return + reward.squeeze()
         cur_length = s.cur_length + 1
 
+        # Segment on the true GAME boundary, not the agent terminal. With
+        # terminal_on_life_loss the env emits `done` per life but `info['real_done']`
+        # only on game over; eval must report full-game returns (comparable to the
+        # paper). Without the wrapper real_done == done, so this is unchanged.
+        boundary = info.get("real_done", done)
+
         # On episode end, record this episode into slot ep_idx (guaranteed < n_episodes
         # by `cond`), then zero the accumulators and advance the episode counter.
-        returns = jnp.where(done, s.returns.at[s.ep_idx].set(cur_return), s.returns)
-        lengths = jnp.where(done, s.lengths.at[s.ep_idx].set(cur_length.astype(jnp.float32)), s.lengths)
-        ep_idx = s.ep_idx + done.astype(jnp.int32)
-        cur_return = jnp.where(done, jnp.float32(0.0), cur_return)
-        cur_length = jnp.where(done, jnp.int32(0), cur_length)
+        returns = jnp.where(boundary, s.returns.at[s.ep_idx].set(cur_return), s.returns)
+        lengths = jnp.where(boundary, s.lengths.at[s.ep_idx].set(cur_length.astype(jnp.float32)), s.lengths)
+        ep_idx = s.ep_idx + boundary.astype(jnp.int32)
+        cur_return = jnp.where(boundary, jnp.float32(0.0), cur_return)
+        cur_length = jnp.where(boundary, jnp.int32(0), cur_length)
 
         return _MultiLaneState(
             rng=rng,

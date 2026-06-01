@@ -212,10 +212,15 @@ def _step_multi_instance(envs, env_idx, action):
     action = np.array(action)
     if action.ndim == 0:
         action = action.item()
-    obs, reward, term, trunc, _ = envs[idx].step(action)
+    obs, reward, term, trunc, info = envs[idx].step(action)
     done = term or trunc
+    # real_done = the true GAME boundary. With EpisodicLifeEnv (terminal_on_life_loss),
+    # `done` fires per LIFE while `info['real_done']` marks only game over; without it
+    # the two coincide. Downstream, `done` is the agent/buffer terminal (per-life n-step
+    # cut) and `real_done` drives full-game return reporting and eval segmentation.
+    real_done = bool(info.get("real_done", done))
     obs = np.asarray(obs)
-    return obs, np.array(idx, dtype=np.int32), float(reward), done, {}
+    return obs, np.array(idx, dtype=np.int32), float(reward), done, {"real_done": real_done}
 
 
 def _reset_multi_instance(envs, env_idx, seed):
@@ -265,7 +270,7 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         idx_sd = ShapeDtypeStruct((), jnp.int32)
         reward_sd = ShapeDtypeStruct((), jnp.float32)
         done_sd = ShapeDtypeStruct((), jnp.bool_)
-        info_sd = {}
+        info_sd = {"real_done": ShapeDtypeStruct((), jnp.bool_)}
         return obs_sd, idx_sd, reward_sd, done_sd, info_sd
 
     def step(self, key, state, action, params=None):
@@ -364,24 +369,90 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
 # ---------------------------------------------------------------------------
 
 
-def create_atari(env_name, *, num_envs: int = 1, **kwargs):
+class EpisodicLifeEnv(gym.Wrapper):
+    """End-of-life == end-of-episode for the AGENT, while the GAME continues.
+
+    Dopamine/SB3-style ``terminal_on_life_loss`` (used by Schwarzer's BBF runner):
+    the agent receives ``terminated=True`` when a life is lost so it does not
+    bootstrap value across the life boundary, but the ALE game is NOT reset on a life
+    loss — only on a true game over — so the agent keeps experiencing the later,
+    deeper states (essential for Breakout, where broken bricks persist across lives).
+
+    gymnasium's own ``AtariPreprocessing(terminal_on_life_loss=True)`` is unsuitable
+    here: it sets ``game_over = terminated`` on life loss and its ``reset()`` always
+    does a full ALE reset, so paired with ``Autoreset`` it would restart the board
+    every life. This wrapper instead does a *soft* reset (a no-op step) on a per-life
+    terminal and only a real reset on a true game over.
+
+    The true game boundary is exposed via ``info['real_done']`` so the reported
+    (full-game) return and the eval episode boundaries use it, while the
+    buffer/n-step terminal uses the per-life ``terminated``.
+
+    Placement: wrap the frame-stacked env and let ``Autoreset`` wrap THIS, so a
+    per-life terminal makes ``Autoreset`` call our ``reset()`` (the soft no-op
+    continuation) rather than a real ALE reset. Sitting above FrameStack also keeps
+    the stacked-frame history continuous across a life boundary (only the newest
+    frame is the post-no-op frame), matching the reference.
+    """
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        self.lives = 0
+        self.was_real_done = True
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        real_done = bool(terminated or truncated)
+        self.was_real_done = real_done
+        # ale.lives() via the wrapped chain (attribute-forwarded down to the ALE env).
+        new_lives = self.env.unwrapped.ale.lives()  # type: ignore[attr-defined]
+        # Life lost but game not truly over -> agent-only terminal (game continues).
+        life_terminal = 0 < new_lives < self.lives
+        self.lives = new_lives
+        info = {**info, "real_done": real_done}
+        return obs, reward, bool(terminated or life_terminal), truncated, info
+
+    def reset(self, *, seed=None, options=None):
+        if self.was_real_done:
+            obs, info = self.env.reset(seed=seed, options=options)
+        else:
+            # Continue the SAME game across the lost life with a no-op step (preserves
+            # board/brick state and the frame-stack history). Guard the rare case where
+            # the no-op itself ends the game.
+            obs, _, terminated, truncated, info = self.env.step(0)
+            if terminated or truncated:
+                obs, info = self.env.reset(seed=seed, options=options)
+        self.lives = self.env.unwrapped.ale.lives()  # type: ignore[attr-defined]
+        # A reset begins a fresh life/continuation, never a game completion.
+        info = {**info, "real_done": False}
+        return obs, info
+
+
+def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = False, **kwargs):
     """Create Atari environment with standard preprocessing.
 
     Observation: (4, 84, 84) uint8 (grayscale, frame-stacked).
+
+    Args:
+        terminal_on_life_loss: if True, the agent sees a terminal on each lost life
+            (via ``EpisodicLifeEnv``) while the game continues across lives and the
+            full-game return is preserved through ``info['real_done']``. Matches
+            Schwarzer's BBF runner; off by default to keep other Atari configs intact.
     """
     import ale_py  # noqa: F401
 
     # Atari-100k convention (and Schwarzer's BBF gin: sticky_actions=False): disable
     # sticky actions. ALE v5 defaults repeat_action_probability=0.25; override to 0.
-    # Caller-supplied kwargs win. terminal_on_life_loss is intentionally NOT enabled
-    # here yet — it needs the reported return decoupled from the per-life terminal
-    # (tracked as a follow-up).
+    # Caller-supplied kwargs win.
     kwargs.setdefault("repeat_action_probability", 0.0)
 
     def make_fn():
         env = gym.make(f"ALE/{env_name}", frameskip=1, **kwargs)
         env = gym.wrappers.AtariPreprocessing(env, frame_skip=4, grayscale_obs=True, scale_obs=False)
         env = gym.wrappers.FrameStackObservation(env, 4)
+        if terminal_on_life_loss:
+            # Above FrameStack, inside Autoreset (see EpisodicLifeEnv docstring).
+            env = EpisodicLifeEnv(env)
         env = Autoreset(env)
         return env
 
