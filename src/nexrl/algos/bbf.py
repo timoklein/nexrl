@@ -394,12 +394,16 @@ def train_bbf(
         rng_steps = jax.random.split(rngs(), num_envs)
         next_obs, new_env_state, rewards, dones, info = vmap_step(rng_steps, carry.env_state, actions, env_params)
 
-        # With terminal_on_life_loss, `dones` is the AGENT terminal (fires per life)
-        # and `info['real_done']` is the true GAME boundary (game over only). The
-        # buffer/n-step use `dones` (bootstrap cut at each life), while the reported
-        # full-game train_return resets/accumulates on `real_dones`. Without the wrapper
-        # the env sets real_done == done, so this is a no-op for other Atari configs.
+        # With terminal_on_life_loss, `dones` is the true GAME boundary (game over) — a
+        # life loss is carried out-of-band in `info['life_terminal']` so it does NOT
+        # trigger an env autoreset (reference: a life loss continues the same game with
+        # the agent's real next action). `real_dones` (== game over) drives the reported
+        # full-game train_return; the buffer/n-step terminal is `dones OR life_terminal`
+        # (bootstrap cut at each life). Without the wrapper both info keys are absent, so
+        # real_dones == dones and life_terminal is all-False — a no-op for other configs.
         real_dones = info.get("real_done", dones)
+        life_terminals = info.get("life_terminal", jnp.zeros_like(dones))
+        agent_dones = jnp.logical_or(dones, life_terminals)
 
         # Reward clipping for the TRAINING signal only (matches Schwarzer's runner,
         # which clips the agent/buffer reward to [-1, 1]). running_return below uses
@@ -417,7 +421,7 @@ def train_bbf(
             obs=carry.last_obs,
             action=actions,
             reward=train_rewards,
-            done=dones,
+            done=agent_dones,
             next_obs=next_obs,
         )
         priorities_B = jnp.full(num_envs, carry.max_priority**config.per_alpha)
@@ -690,7 +694,11 @@ def train_bbf(
             metrics_count = metrics_count + 1
 
             # --- Periodic shrink-and-perturb reset (env-step semantics) ---
-            if config.reset_every > 0 and env_steps_collected >= next_reset_at and next_reset_at <= config.no_resets_after:
+            # Strict `<`: with no_resets_after == total_timesteps the final iteration
+            # hits env_steps == total exactly, so `<=` would fire a pointless reset on
+            # the LAST step — perturbing the reported/saved policy right before the final
+            # eval (eval ~0). `<` keeps resets at 20/40/60/80k and excludes the terminal.
+            if config.reset_every > 0 and env_steps_collected >= next_reset_at and next_reset_at < config.no_resets_after:
                 # Draw the random component of S&P outside JIT — eager construction
                 # of a fresh BBFNetwork lets us re-use the network's real init path
                 # (kernel inits, biases) rather than a fan-in heuristic. Independent

@@ -214,13 +214,22 @@ def _step_multi_instance(envs, env_idx, action):
         action = action.item()
     obs, reward, term, trunc, info = envs[idx].step(action)
     done = term or trunc
-    # real_done = the true GAME boundary. With EpisodicLifeEnv (terminal_on_life_loss),
-    # `done` fires per LIFE while `info['real_done']` marks only game over; without it
-    # the two coincide. Downstream, `done` is the agent/buffer terminal (per-life n-step
-    # cut) and `real_done` drives full-game return reporting and eval segmentation.
+    # With EpisodicLifeEnv (terminal_on_life_loss), `done` is the GAME boundary (game
+    # over) and `info['life_terminal']` marks a life loss that continues the game (no
+    # reset); `info['real_done']` also marks game over. Without the wrapper, life_terminal
+    # is absent (False) and real_done coincides with done. Downstream, the buffer/n-step
+    # terminal is `done OR life_terminal` (per-life cut) and `real_done` drives full-game
+    # return reporting and eval segmentation.
     real_done = bool(info.get("real_done", done))
+    life_terminal = bool(info.get("life_terminal", False))
     obs = np.asarray(obs)
-    return obs, np.array(idx, dtype=np.int32), float(reward), done, {"real_done": real_done}
+    return (
+        obs,
+        np.array(idx, dtype=np.int32),
+        float(reward),
+        done,
+        {"real_done": real_done, "life_terminal": life_terminal},
+    )
 
 
 def _reset_multi_instance(envs, env_idx, seed):
@@ -270,7 +279,10 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         idx_sd = ShapeDtypeStruct((), jnp.int32)
         reward_sd = ShapeDtypeStruct((), jnp.float32)
         done_sd = ShapeDtypeStruct((), jnp.bool_)
-        info_sd = {"real_done": ShapeDtypeStruct((), jnp.bool_)}
+        info_sd = {
+            "real_done": ShapeDtypeStruct((), jnp.bool_),
+            "life_terminal": ShapeDtypeStruct((), jnp.bool_),
+        }
         return obs_sd, idx_sd, reward_sd, done_sd, info_sd
 
     def step(self, key, state, action, params=None):
@@ -378,21 +390,29 @@ class EpisodicLifeEnv(gym.Wrapper):
     loss — only on a true game over — so the agent keeps experiencing the later,
     deeper states (essential for Breakout, where broken bricks persist across lives).
 
-    gymnasium's own ``AtariPreprocessing(terminal_on_life_loss=True)`` is unsuitable
-    here: it sets ``game_over = terminated`` on life loss and its ``reset()`` always
-    does a full ALE reset, so paired with ``Autoreset`` it would restart the board
-    every life. This wrapper instead does a *soft* reset (a no-op step) on a per-life
-    terminal and only a real reset on a true game over.
+    Reference parity (Schwarzer's ``DataEfficientAtariRunner._run_parallel``,
+    ``bbf/eval_run_experiment.py``): a life loss does NOT reset the env. On a life
+    loss the reference stores the per-life terminal in the buffer but only calls
+    ``agent.reset_one`` (its ``elif d:`` branch) — it does NOT re-initialise the env,
+    so the agent's REAL next action continues the same game. Only a true game over
+    triggers a real reset. This wrapper therefore does NOT raise a gym terminal on a
+    life loss: it passes the underlying ``terminated`` (game over only) to the outer
+    ``Autoreset`` so a reset fires ONLY at game over, and carries the per-life terminal
+    out-of-band in ``info['life_terminal']``. Downstream (BBF ``jit_collect``) the
+    buffer/n-step terminal is ``done OR life_terminal`` (bootstrap cut per life), while
+    ``info['real_done']`` (game over) drives the reported full-game return and eval
+    episode segmentation.
 
-    The true game boundary is exposed via ``info['real_done']`` so the reported
-    (full-game) return and the eval episode boundaries use it, while the
-    buffer/n-step terminal uses the per-life ``terminated``.
+    Why not raise the per-life terminal and let ``Autoreset`` fire: gymnasium's
+    ``Autoreset`` discards the agent's action on the post-terminal step and forces
+    ``reward=0`` — so raising a terminal every life injects ~5 corrupted
+    (discarded-action, reward-0) transitions per game, which halved Breakout. Passing
+    only the game-over terminal keeps autoreset to one transition per game (game over),
+    on par with non-TLL Atari.
 
-    Placement: wrap the frame-stacked env and let ``Autoreset`` wrap THIS, so a
-    per-life terminal makes ``Autoreset`` call our ``reset()`` (the soft no-op
-    continuation) rather than a real ALE reset. Sitting above FrameStack also keeps
-    the stacked-frame history continuous across a life boundary (only the newest
-    frame is the post-no-op frame), matching the reference.
+    Placement: wrap the frame-stacked env, with ``Autoreset`` wrapping THIS. Sitting
+    above FrameStack keeps the stacked-frame history continuous across a life boundary,
+    matching the reference.
     """
 
     def __init__(self, env: gym.Env):
@@ -409,22 +429,19 @@ class EpisodicLifeEnv(gym.Wrapper):
         # Life lost but game not truly over -> agent-only terminal (game continues).
         life_terminal = 0 < new_lives < self.lives
         self.lives = new_lives
-        info = {**info, "real_done": real_done}
-        return obs, reward, bool(terminated or life_terminal), truncated, info
+        # Pass through the GAME-OVER terminal only (so Autoreset fires only at game
+        # over); carry the per-life terminal out-of-band. No env reset on a life loss.
+        info = {**info, "real_done": real_done, "life_terminal": bool(life_terminal)}
+        return obs, reward, terminated, truncated, info
 
     def reset(self, *, seed=None, options=None):
-        if self.was_real_done:
-            obs, info = self.env.reset(seed=seed, options=options)
-        else:
-            # Continue the SAME game across the lost life with a no-op step (preserves
-            # board/brick state and the frame-stack history). Guard the rare case where
-            # the no-op itself ends the game.
-            obs, _, terminated, truncated, info = self.env.step(0)
-            if terminated or truncated:
-                obs, info = self.env.reset(seed=seed, options=options)
+        # A life loss no longer raises a gym terminal, so the outer Autoreset only
+        # resets at a true game over: this is always a real ALE reset starting a fresh
+        # game (matching the reference's _initialize_episode at game over).
+        obs, info = self.env.reset(seed=seed, options=options)
         self.lives = self.env.unwrapped.ale.lives()  # type: ignore[attr-defined]
-        # A reset begins a fresh life/continuation, never a game completion.
-        info = {**info, "real_done": False}
+        self.was_real_done = True
+        info = {**info, "real_done": False, "life_terminal": False}
         return obs, info
 
 
