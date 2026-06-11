@@ -450,6 +450,12 @@ class BBFConfig(_BaseConfig):
     # Augmentation
     data_augmentation: bool = True
     shift_pad: int = 4
+    # Augment the SPR target's future frames (random-shift + intensity), exactly
+    # like the current/next obs. Schwarzer's BBF augments the WHOLE subsequence
+    # (spr_agent.py:587) then slices the augmented future frames for the SPR
+    # target (spr_agent.py:725), so the target sees augmented views. Set False to
+    # feed raw future frames (ablation control). Only active when data_augmentation.
+    augment_spr_targets: bool = True
     # Terminal-on-life-loss (Atari): the agent sees a per-life terminal (n-step cut at
     # life boundaries) while the game continues across lives and train_return/eval stay
     # full-game. Matches Schwarzer's BBF runner. Off by default for non-Breakout configs.

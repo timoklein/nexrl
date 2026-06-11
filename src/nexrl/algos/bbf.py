@@ -489,9 +489,20 @@ def train_bbf(
         )
         projected_BN = jax.lax.stop_gradient(projected_BN)
 
-        # SPR targets from target encoder
+        # SPR targets from target encoder. The reference augments the entire
+        # subsequence (spr_agent.py:587) and slices the augmented future frames
+        # for the SPR target (spr_agent.py:725), so every future frame gets the
+        # same per-image random-shift + intensity as the current/next obs. We
+        # flatten (J, B) into one batch axis and augment per-image to match.
         future_obs_JB = subseq_mb.obs[:, 1 : config.jumps + 1]  # (B, J, C, H, W)
         future_obs_JBCHW = jnp.transpose(future_obs_JB, (1, 0, *range(2, future_obs_JB.ndim)))  # (J, B, C, H, W)
+        if config.data_augmentation and config.augment_spr_targets:
+            J, B = future_obs_JBCHW.shape[:2]
+            chw = future_obs_JBCHW.shape[2:]  # (C, H, W)
+            future_flat = future_obs_JBCHW.reshape(J * B, *chw)  # (J*B, C, H, W)
+            future_flat = random_shift(rngs(), future_flat, pad=config.shift_pad)
+            future_flat = random_intensity(rngs(), future_flat)
+            future_obs_JBCHW = future_flat.reshape(J, B, *chw)
         spr_tgt_JBP = spr_targets(q_tgt, future_obs_JBCHW)
 
         spr_actions_BJ = subseq_mb.action[:, : config.jumps]  # (B, J)
@@ -693,22 +704,12 @@ def train_bbf(
             metrics_accum = jax.tree.map(lambda a, m: a + m, metrics_accum, update_metrics)
             metrics_count = metrics_count + 1
 
-            # --- Periodic shrink-and-perturb reset (env-step semantics) ---
-            # Strict `<`: with no_resets_after == total_timesteps the final iteration
-            # hits env_steps == total exactly, so `<=` would fire a pointless reset on
-            # the LAST step — perturbing the reported/saved policy right before the final
-            # eval (eval ~0). `<` keeps resets at 20/40/60/80k and excludes the terminal.
-            if config.reset_every > 0 and env_steps_collected >= next_reset_at and next_reset_at < config.no_resets_after:
-                # Draw the random component of S&P outside JIT — eager construction
-                # of a fresh BBFNetwork lets us re-use the network's real init path
-                # (kernel inits, biases) rather than a fan-in heuristic. Independent
-                # `rngs()` advances for online and target yield independent draws.
-                fresh = make_fresh_params(rngs())
-                fresh_target = make_fresh_params(rngs())
-                carry = jit_reset(network, optimizer, target, carry, fresh, fresh_target)
-                next_reset_at += config.reset_every
-
-        # --- Periodic evaluation ---
+        # --- Periodic evaluation (runs BEFORE the S&P reset below) ---
+        # reset_every (20k) is an exact multiple of eval_freq (10k), so every reset lands
+        # on a 20/40/60/80k eval point. Evaluating BEFORE the reset reports the trained
+        # end-of-cycle policy; evaluating after reads the freshly-perturbed network (random
+        # Q-head ⇒ ≈0 return) — the cosmetic dip that made those eval points illegible. The
+        # reset still fires this iteration, just after the eval has read the pre-reset weights.
         if (step + 1) % eval_period == 0:
             # `final_eval_only` runs the costly 128-episode Atari eval just once, at the
             # last eval point; the train_return curve is still logged every eval_period.
@@ -745,6 +746,26 @@ def train_bbf(
                 completed_returns_sum=jnp.float32(0.0),
                 completed_returns_count=jnp.int32(0),
             )
+
+        # --- Periodic shrink-and-perturb reset (env-step semantics) — AFTER eval ---
+        # Guarded by `step >= fill_steps` so no reset fires before training starts. Strict
+        # `<` on no_resets_after: with no_resets_after == total_timesteps the final iteration
+        # hits env_steps == total exactly, so `<=` would fire a pointless reset on the last
+        # step. `<` keeps resets at 20/40/60/80k and excludes the 100k terminal.
+        if (
+            step >= fill_steps
+            and config.reset_every > 0
+            and env_steps_collected >= next_reset_at
+            and next_reset_at < config.no_resets_after
+        ):
+            # Draw the random component of S&P outside JIT — eager construction of a fresh
+            # BBFNetwork re-uses the network's real init path (kernel inits, biases) rather
+            # than a fan-in heuristic. Independent `rngs()` advances for online and target
+            # yield independent draws.
+            fresh = make_fresh_params(rngs())
+            fresh_target = make_fresh_params(rngs())
+            carry = jit_reset(network, optimizer, target, carry, fresh, fresh_target)
+            next_reset_at += config.reset_every
 
     # Pad if fewer evals than expected
     while len(all_metrics_list) < num_evals:
