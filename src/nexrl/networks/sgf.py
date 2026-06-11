@@ -33,15 +33,26 @@ from nexrl.networks.mrq import LNBlock
 # ---------------------------------------------------------------------------
 
 
-def random_shift(rng: jax.Array, obs_BCHW: jax.Array, pad: int = 3) -> jax.Array:
+def random_shift(rng: jax.Array, obs_BCHW: jax.Array, pad: int = 3, *, max_offset: int | None = None) -> jax.Array:
     """Pad with edge replication and random crop back to original size.
 
-    Per-sample random shifts up to `pad` pixels in any direction.
+    The crop offset is drawn from ``[0, max_offset)`` per sample. The image is
+    edge-padded by ``pad`` on each side (height ``H + 2*pad``), so offset ``pad``
+    is the centered "no shift" crop and there are ``2*pad + 1`` valid positions.
+    ``max_offset`` controls which subset is sampled:
+
+      - ``max_offset = pad + 1`` (default, ``None``): offsets ``[0, pad]`` — a
+        ONE-SIDED shift toward the top-left only (legacy SGF/DrQ-v2 behavior).
+      - ``max_offset = 2*pad``: offsets ``[0, 2*pad)`` — shifts in BOTH
+        directions, matching Schwarzer's BBF ``drq_image_aug`` which crops with
+        ``randint(minval=0, maxval=padded - cropped = 2*pad)`` (spr_networks.py:
+        106-118, _per_image_random_crop). This is the reference-faithful range.
 
     Args:
         rng: PRNG key
         obs_BCHW: (B, C, H, W) float tensor
         pad: number of pixels to pad on each side
+        max_offset: exclusive upper bound for the crop offset; ``None`` -> ``pad + 1``
 
     Returns:
         Shifted observations, same shape as input
@@ -49,10 +60,12 @@ def random_shift(rng: jax.Array, obs_BCHW: jax.Array, pad: int = 3) -> jax.Array
     B, C, H, W = obs_BCHW.shape
     # Pad with edge replication
     padded = jnp.pad(obs_BCHW, ((0, 0), (0, 0), (pad, pad), (pad, pad)), mode="edge")
-    # Random offsets in [0, pad] inclusive for each sample
+    if max_offset is None:
+        max_offset = pad + 1  # legacy one-sided [0, pad] range
+    # Random offsets in [0, max_offset) for each sample
     rng_h, rng_w = jax.random.split(rng)
-    h_offsets = jax.random.randint(rng_h, (B,), 0, pad + 1)
-    w_offsets = jax.random.randint(rng_w, (B,), 0, pad + 1)
+    h_offsets = jax.random.randint(rng_h, (B,), 0, max_offset)
+    w_offsets = jax.random.randint(rng_w, (B,), 0, max_offset)
 
     # Use vmap + dynamic_slice for JIT compatibility
     def _crop_single(padded_single, h_off, w_off):

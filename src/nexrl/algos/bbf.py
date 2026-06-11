@@ -451,6 +451,11 @@ def train_bbf(
         current_n = _anneal_n_step(carry.cycle_grad_steps, config.max_n_step, config.n_step, config.cycle_steps)
         current_gamma = _anneal_gamma(carry.cycle_grad_steps, config.gamma, config.min_gamma, config.cycle_steps)
 
+        # Reference random-shift range: Schwarzer's drq_image_aug crops with offset
+        # in [0, 2*pad) (both directions); our shared random_shift defaults to the
+        # one-sided [0, pad] range, so pass max_offset explicitly when full_range_shift.
+        shift_max_offset = 2 * config.shift_pad if config.full_range_shift else None
+
         # random_shift is dtype-agnostic (pad + dynamic_slice). Augment in uint8
         # so the spatial crop is precision-free, then apply intensity aug
         # (matches Schwarzer's drq_image_aug: per-image multiplicative noise on
@@ -458,7 +463,7 @@ def train_bbf(
         # encoder's `.astype(compute_dtype) / 255.0` then makes it [0, ~1.1].
         current_obs_BCHW = subseq_mb.obs[:, 0]  # (B, C, H, W) uint8
         if config.data_augmentation:
-            current_obs_BCHW = random_shift(rngs(), current_obs_BCHW, pad=config.shift_pad)
+            current_obs_BCHW = random_shift(rngs(), current_obs_BCHW, pad=config.shift_pad, max_offset=shift_max_offset)
             current_obs_BCHW = random_intensity(rngs(), current_obs_BCHW)
 
         n_step_return_B, bootstrap_discount_B, effective_next_obs_B = _compute_nstep_from_subsequence(
@@ -471,7 +476,7 @@ def train_bbf(
 
         next_obs_aug_BCHW = effective_next_obs_B
         if config.data_augmentation:
-            next_obs_aug_BCHW = random_shift(rngs(), next_obs_aug_BCHW, pad=config.shift_pad)
+            next_obs_aug_BCHW = random_shift(rngs(), next_obs_aug_BCHW, pad=config.shift_pad, max_offset=shift_max_offset)
             next_obs_aug_BCHW = random_intensity(rngs(), next_obs_aug_BCHW)
 
         # C51 target (DDQN: online selects action, target provides distribution)
@@ -500,7 +505,7 @@ def train_bbf(
             J, B = future_obs_JBCHW.shape[:2]
             chw = future_obs_JBCHW.shape[2:]  # (C, H, W)
             future_flat = future_obs_JBCHW.reshape(J * B, *chw)  # (J*B, C, H, W)
-            future_flat = random_shift(rngs(), future_flat, pad=config.shift_pad)
+            future_flat = random_shift(rngs(), future_flat, pad=config.shift_pad, max_offset=shift_max_offset)
             future_flat = random_intensity(rngs(), future_flat)
             future_obs_JBCHW = future_flat.reshape(J, B, *chw)
         spr_tgt_JBP = spr_targets(q_tgt, future_obs_JBCHW)

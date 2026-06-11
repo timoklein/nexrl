@@ -450,6 +450,13 @@ class BBFConfig(_BaseConfig):
     # Augmentation
     data_augmentation: bool = True
     shift_pad: int = 4
+    # Random-shift offset range. Schwarzer's BBF crops with offset in [0, 2*pad)
+    # (drq_image_aug -> _per_image_random_crop, randint(0, padded - cropped = 2*pad);
+    # spr_networks.py:106-118), giving shifts in BOTH directions. Our shared
+    # `random_shift` defaults to a one-sided [0, pad] range (SGF/DrQ-v2). True ->
+    # pass the reference [0, 2*pad) range at BBF's augmentation call sites; False ->
+    # the legacy one-sided range (ablation control). Only active when data_augmentation.
+    full_range_shift: bool = True
     # Augment the SPR target's future frames (random-shift + intensity), exactly
     # like the current/next obs. Schwarzer's BBF augments the WHOLE subsequence
     # (spr_agent.py:587) then slices the augmented future frames for the SPR
