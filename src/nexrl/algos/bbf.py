@@ -710,11 +710,13 @@ def train_bbf(
             metrics_count = metrics_count + 1
 
         # --- Periodic evaluation (runs BEFORE the S&P reset below) ---
-        # reset_every (20k) is an exact multiple of eval_freq (10k), so every reset lands
-        # on a 20/40/60/80k eval point. Evaluating BEFORE the reset reports the trained
-        # end-of-cycle policy; evaluating after reads the freshly-perturbed network (random
-        # Q-head ⇒ ≈0 return) — the cosmetic dip that made those eval points illegible. The
-        # reset still fires this iteration, just after the eval has read the pre-reset weights.
+        # reset_every (5k) and eval_freq (10k) share the 10k grid, so every SECOND reset
+        # lands on an eval point (10/20/.../90k); the in-between resets (5/15/.../95k) fall
+        # between evals. The eval `if` block precedes the reset `if` block in this loop body,
+        # so at every coinciding point the eval reads the trained end-of-cycle policy BEFORE
+        # the reset perturbs it (a post-reset eval reads the random Q-head ⇒ ≈0 return — the
+        # cosmetic dip that made those eval points illegible). The reset still fires this
+        # iteration, just after the eval has read the pre-reset weights.
         if (step + 1) % eval_period == 0:
             # `final_eval_only` runs the costly 128-episode Atari eval just once, at the
             # last eval point; the train_return curve is still logged every eval_period.
@@ -756,7 +758,9 @@ def train_bbf(
         # Guarded by `step >= fill_steps` so no reset fires before training starts. Strict
         # `<` on no_resets_after: with no_resets_after == total_timesteps the final iteration
         # hits env_steps == total exactly, so `<=` would fire a pointless reset on the last
-        # step. `<` keeps resets at 20/40/60/80k and excludes the 100k terminal.
+        # step. `<` keeps resets at 5/10/.../95k and excludes the 100k terminal. (Reference
+        # additionally skips a reset lacking a full interval to recover before no_resets_after,
+        # so its last reset is ~90k vs our 95k — one extra late reset; deferred 🟡 minor.)
         if (
             step >= fill_steps
             and config.reset_every > 0
