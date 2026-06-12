@@ -519,8 +519,10 @@ def train_bbf(
         def loss_fn(model):
             # Encode to the spatial latent once: project it for the Q-head, and
             # roll the convolutional SPR transition forward from the same latent.
+            # ReLU is on the Q-head path only (reference __call__: project then
+            # relu before head); SPR rollout/targets use the RAW projection.
             spatial_BHWC = model.encode_spatial(current_obs_BCHW)
-            features_BF = model.project(spatial_BHWC)
+            features_BF = nnx.relu(model.project(spatial_BHWC))
 
             # Compute q_logits once and derive both log_probs (for CE) and
             # mean_q metric from it. XLA likely CSEs this anyway but explicit
