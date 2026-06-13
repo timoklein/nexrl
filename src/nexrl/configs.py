@@ -475,6 +475,18 @@ class BBFConfig(_BaseConfig):
     per_alpha: float = 0.5
     per_beta: float = 0.5
     per_eps: float = 1e-6
+    # Sharp per-sample PER (ours) vs the reference's EFFECTIVE near-uniform sampling.
+    # True (default): every sampled transition's priority is updated to its own
+    # (ce+eps)^alpha each step -> sampling concentrates on high-TD transitions, IS
+    # weights vary strongly. False: replicate Schwarzer's *effective* behavior — his
+    # set_priority zip-bug (spr_agent.py:1646-1649 zips (B*G,) indices with (G,)
+    # batch-MEAN priorities) updates only ~2 of 64 sampled transitions per step, so
+    # ~62/64 stay frozen at their max-priority insert value (subsequence_replay_buffer.py
+    # _add: Schaul max-for-new). Net: ≈ uniform sampling + weak recency (new data at the
+    # running max), IS weights ≈ 1. We skip the per-sample priority updates (freeze at
+    # insert) but keep max_priority tracking the running-mean loss so new inserts sit at
+    # the highest priority. Not the literal zip bug — its effect. The 357 agent ran False.
+    sharp_per: bool = True
     # Standard
     normalize_observations: bool = False
     normalize_rewards: bool = False

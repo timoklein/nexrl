@@ -101,11 +101,45 @@ def _anneal_gamma(
     min_gamma: float,
     cycle_steps: int,
 ) -> jax.Array:
-    """Exponential increase from min_gamma to max_gamma over cycle_steps."""
+    """Exponential increase from min_gamma to max_gamma over cycle_steps.
+
+    Interpolates in **log(1 - gamma)** space (the effective-horizon space), matching
+    Schwarzer's ``exponential_decay_scheduler(cycle_steps, 0, min_gamma, gamma,
+    reverse=True)`` for the gamma schedule (spr_agent.py:311-352, 1259-1261).
+    ``reverse=True`` makes 1.0 the asymptote, so the log-interpolated quantity is
+    ``1 - gamma`` rather than ``gamma``. At the cycle midpoint this gives
+    ``gamma = 1 - sqrt((1-min_gamma)(1-max_gamma)) ≈ 0.9905`` (effective horizon ~105),
+    versus ~0.9834 (horizon ~60) if ``log(gamma)`` were interpolated directly.
+    Endpoints are identical either way; the path through every anneal phase differs,
+    and BBF anneals 25% of all training (10k of each 40k-grad-step cycle).
+    """
     frac = jnp.minimum(cycle_grad_steps.astype(jnp.float32) / cycle_steps, 1.0)
-    log_max = jnp.log(jnp.float32(max_gamma))
-    log_min = jnp.log(jnp.float32(min_gamma))
-    return jnp.exp(log_min + (log_max - log_min) * frac)
+    log_one_minus_min = jnp.log(jnp.float32(1.0 - min_gamma))
+    log_one_minus_max = jnp.log(jnp.float32(1.0 - max_gamma))
+    one_minus_gamma = jnp.exp(log_one_minus_min + (log_one_minus_max - log_one_minus_min) * frac)
+    return 1.0 - one_minus_gamma
+
+
+def _anneal_epsilon(
+    global_step: jax.Array,
+    fill_buffer: int,
+    decay_period: int,
+    epsilon_train: float,
+) -> jax.Array:
+    """Linear epsilon decay that starts AFTER buffer fill (dopamine ``linearly_decaying_epsilon``).
+
+    Reference holds epsilon = 1 for the first ``min_replay_history`` (== ``fill_buffer``)
+    env steps — the warmup window — then decays 1 -> ``epsilon_train`` linearly over the
+    next ``decay_period`` env steps (BBF.gin: warmup 2000, decay_period 2001,
+    epsilon_train 0; ``dqn_agent.linearly_decaying_epsilon``). During fill the action is
+    uniform regardless (the ``jax.lax.cond`` in ``jit_collect``), so warming epsilon = 1
+    there is a no-op; the meaningful effect is ~``decay_period`` env steps of annealed
+    exploration with the trained (target) policy after training begins. Our old schedule
+    decayed from step 0, so epsilon reached ``epsilon_train`` the moment updates began —
+    losing that post-fill exploration window.
+    """
+    decay_frac = jnp.clip((global_step - fill_buffer).astype(jnp.float32) / decay_period, 0.0, 1.0)
+    return 1.0 - (1.0 - epsilon_train) * decay_frac
 
 
 # ---------------------------------------------------------------------------
@@ -375,11 +409,7 @@ def train_bbf(
     def jit_collect(carry, q_net, target_net, rngs):
         rng_action = rngs()
 
-        epsilon = jnp.where(
-            carry.global_step < config.epsilon_decay_period,
-            config.epsilon_train + (1.0 - config.epsilon_train) * (1.0 - carry.global_step / config.epsilon_decay_period),
-            config.epsilon_train,
-        )
+        epsilon = _anneal_epsilon(carry.global_step, config.fill_buffer, config.epsilon_decay_period, config.epsilon_train)
 
         def sample_uniform(rng):
             return jax.vmap(action_space.sample)(jax.random.split(rng, num_envs))
@@ -550,9 +580,25 @@ def train_bbf(
         (loss, (ce_B, spr_loss_B, mean_q)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(q_net)
         q_opt.update(q_net, grads)
 
+        # Per-sample priority value from the C51 cross-entropy (the metric uses its mean in
+        # both regimes; the sharp regime also writes it back to the buffer).
         new_priorities_B = ce_B + config.per_eps
-        new_buf = carry.replay_buffer.update_priorities(indices, new_priorities_B**config.per_alpha)
-        new_max_priority = jnp.maximum(carry.max_priority, new_priorities_B.max())
+
+        # PER priority update. Sharp (ours, default): set every sampled transition's
+        # priority to its own (ce+eps)^alpha -> sampling concentrates on high-TD samples.
+        # Non-sharp (reference-effective near-uniform + recency): skip the per-sample
+        # updates so priorities stay frozen at their max-priority insert value, but keep
+        # max_priority tracking the running BATCH-MEAN loss (the reference's set_priority
+        # writes sqrt(batch-mean DQNLoss)) so new inserts sit at the running max -> weak
+        # recency. Sampling stays ~uniform and the IS weights_B applied in loss_fn fall out
+        # ~1, matching Schwarzer's effective behavior (the 357 agent). `config.sharp_per`
+        # is a static Python bool, so this branch is resolved at trace time (no nnx.cond).
+        if config.sharp_per:
+            new_buf = carry.replay_buffer.update_priorities(indices, new_priorities_B**config.per_alpha)
+            new_max_priority = jnp.maximum(carry.max_priority, new_priorities_B.max())
+        else:
+            new_buf = carry.replay_buffer  # freeze per-sample priorities (no sharp PER update)
+            new_max_priority = jnp.maximum(carry.max_priority, new_priorities_B.mean())
 
         _polyak_update(q_net, q_tgt, 1.0 - config.target_update_tau)
 
@@ -664,6 +710,15 @@ def train_bbf(
         act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=config.epsilon_eval), config, None)
         return evaluate(act_fn, rngs(), env, env_params, 128, max_steps)
 
+    # Reference acts with the EMA target net for BOTH collection and eval when
+    # target_action_selection=True (spr_agent.py:1882-1884: select_params = target if
+    # target_action_selection else online — independent of eval_mode). Our collection
+    # already does this (jit_collect: select_net = target_net if target_action_selection);
+    # evaluate the same net so eval matches the acting policy. The EMA-smoothed target
+    # should also reduce our single-eval-point variance. `target` is mutated in place by
+    # the Polyak update, so this reference stays the live target across the loop.
+    eval_net = target if config.target_action_selection else network
+
     # -----------------------------------------------------------------------
     # Python outer loop
     # -----------------------------------------------------------------------
@@ -688,7 +743,7 @@ def train_bbf(
 
     # Optional initial evaluation
     if config.run_evaluation and not config.skip_initial_evaluation:
-        eval_lengths, eval_returns = run_eval(network, rngs)
+        eval_lengths, eval_returns = run_eval(eval_net, rngs)
         initial_metrics = {
             "eval_lengths": eval_lengths,
             "eval_returns": eval_returns,
@@ -725,7 +780,7 @@ def train_bbf(
             is_final_eval = (step + 1) == total_env_steps
             do_eval = config.run_evaluation and (not config.final_eval_only or is_final_eval)
             if do_eval:
-                eval_lengths, eval_returns = run_eval(network, rngs)
+                eval_lengths, eval_returns = run_eval(eval_net, rngs)
             else:
                 eval_lengths = jnp.zeros(128, dtype=jnp.float32)
                 eval_returns = jnp.zeros(128, dtype=jnp.float32)
