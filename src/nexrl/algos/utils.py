@@ -257,6 +257,7 @@ def create_encoder(
     *,
     compute_dtype: jnp.dtype = jnp.float32,
     return_spatial: bool = False,
+    kernel_init: nnx.Initializer | None = None,
 ) -> NatureCNNEncoder | ImpalaCNNEncoder:
     """Create CNN encoder from CNNConfig.
 
@@ -268,6 +269,9 @@ def create_encoder(
             remain fp32. Defaults to fp32 to preserve behavior for non-BBF callers.
         return_spatial: If True (IMPALA only), return the (B, H', W', C) spatial
             latent instead of flat features (BBF convolutional SPR path).
+        kernel_init: Conv/Dense kernel initializer. None (default) keeps the NNX
+            default (lecun_normal) so PPO/SGF/etc. callers are unchanged; BBF passes
+            xavier_uniform to match Schwarzer's reference (IMPALA encoder only).
     """
     in_channels, height, width = obs_shape[0], obs_shape[1], obs_shape[2]
     if encoder_config.encoder == "nature":
@@ -291,6 +295,7 @@ def create_encoder(
             width_scale=encoder_config.width_scale,
             compute_dtype=compute_dtype,
             return_spatial=return_spatial,
+            kernel_init=kernel_init,
         )
     else:
         raise ValueError(f"Unknown encoder: {encoder_config.encoder!r}. Expected 'nature' or 'impala'.")

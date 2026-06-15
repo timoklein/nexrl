@@ -255,6 +255,13 @@ def _create_networks(
 
     compute_dtype = jnp.bfloat16 if config.compute_dtype == "bfloat16" else jnp.float32
 
+    # Finding #7: xavier_uniform init (reference) vs NNX default lecun_normal (ours).
+    # None -> NNX default (also keeps PPO/SGF encoder callers unchanged). Threaded into
+    # both the encoder factory and every BBFNetwork construction below — including the
+    # S&P reset's fresh draws (make_fresh_params shares net_kwargs/_make_encoder), so
+    # resets re-draw from the matched init distribution.
+    kernel_init = nnx.initializers.xavier_uniform() if config.xavier_init else None
+
     if config.encoder_kwargs is not None:
         features_dim = config.encoder_kwargs.features_dim
         in_features = 0
@@ -276,6 +283,7 @@ def _create_networks(
             encoder_rngs,
             compute_dtype=compute_dtype,
             return_spatial=True,
+            kernel_init=kernel_init,
         )
 
     encoder = _make_encoder(rngs)
@@ -288,6 +296,7 @@ def _create_networks(
         "v_max": config.v_max,
         "features_dim": features_dim,
         "in_features": in_features,
+        "kernel_init": kernel_init,
     }
 
     network = BBFNetwork(**net_kwargs, encoder=encoder, rngs=rngs, compute_dtype=compute_dtype)

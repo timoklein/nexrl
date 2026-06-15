@@ -13,6 +13,8 @@ Dimension key:
     F: features_dim (output embedding size)
 """
 
+from typing import Any
+
 import jax
 from flax import nnx
 from jax import numpy as jnp
@@ -107,7 +109,18 @@ class NatureCNNEncoder(nnx.Module):
 class _ResBlock(nnx.Module):
     """Residual block: ReLU -> Conv -> ReLU -> Conv -> + input."""
 
-    def __init__(self, channels: int, rngs: nnx.Rngs, *, compute_dtype: jnp.dtype = jnp.float32):
+    def __init__(
+        self,
+        channels: int,
+        rngs: nnx.Rngs,
+        *,
+        compute_dtype: jnp.dtype = jnp.float32,
+        kernel_init: nnx.Initializer | None = None,
+    ):
+        # kernel_init=None -> use NNX's default (lecun_normal); a passed initializer
+        # (e.g. xavier_uniform for the BBF reference) overrides it. Spread as kwargs
+        # so None preserves the exact NNX default for non-BBF callers.
+        init_kwargs: dict[str, Any] = {} if kernel_init is None else {"kernel_init": kernel_init}
         self.conv1 = nnx.Conv(
             in_features=channels,
             out_features=channels,
@@ -116,6 +129,7 @@ class _ResBlock(nnx.Module):
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
+            **init_kwargs,
         )
         self.conv2 = nnx.Conv(
             in_features=channels,
@@ -125,6 +139,7 @@ class _ResBlock(nnx.Module):
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
+            **init_kwargs,
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -146,7 +161,9 @@ class _ConvSequence(nnx.Module):
         rngs: nnx.Rngs,
         *,
         compute_dtype: jnp.dtype = jnp.float32,
+        kernel_init: nnx.Initializer | None = None,
     ):
+        init_kwargs: dict[str, Any] = {} if kernel_init is None else {"kernel_init": kernel_init}
         self.conv = nnx.Conv(
             in_features=in_channels,
             out_features=out_channels,
@@ -155,9 +172,10 @@ class _ConvSequence(nnx.Module):
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
+            **init_kwargs,
         )
-        self.res1 = _ResBlock(out_channels, rngs, compute_dtype=compute_dtype)
-        self.res2 = _ResBlock(out_channels, rngs, compute_dtype=compute_dtype)
+        self.res1 = _ResBlock(out_channels, rngs, compute_dtype=compute_dtype, kernel_init=kernel_init)
+        self.res2 = _ResBlock(out_channels, rngs, compute_dtype=compute_dtype, kernel_init=kernel_init)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         x = self.conv(x)
@@ -202,14 +220,18 @@ class ImpalaCNNEncoder(nnx.Module):
         width_scale: int = 1,
         compute_dtype: jnp.dtype = jnp.float32,
         return_spatial: bool = False,
+        kernel_init: nnx.Initializer | None = None,
     ):
         self._features_dim = features_dim
         self._compute_dtype = compute_dtype
         self._return_spatial = return_spatial
+        # kernel_init=None -> NNX default (lecun_normal), preserving behavior for
+        # PPO/SGF/etc. callers; BBF passes xavier_uniform to match the reference.
+        init_kwargs: dict[str, Any] = {} if kernel_init is None else {"kernel_init": kernel_init}
         channels = [16 * width_scale, 32 * width_scale, 32 * width_scale]
-        self.seq1 = _ConvSequence(in_channels, channels[0], rngs, compute_dtype=compute_dtype)
-        self.seq2 = _ConvSequence(channels[0], channels[1], rngs, compute_dtype=compute_dtype)
-        self.seq3 = _ConvSequence(channels[1], channels[2], rngs, compute_dtype=compute_dtype)
+        self.seq1 = _ConvSequence(in_channels, channels[0], rngs, compute_dtype=compute_dtype, kernel_init=kernel_init)
+        self.seq2 = _ConvSequence(channels[0], channels[1], rngs, compute_dtype=compute_dtype, kernel_init=kernel_init)
+        self.seq3 = _ConvSequence(channels[1], channels[2], rngs, compute_dtype=compute_dtype, kernel_init=kernel_init)
 
         # Compute spatial size after 3x SAME-padded max pool (stride 2)
         h, w = height, width
@@ -229,6 +251,7 @@ class ImpalaCNNEncoder(nnx.Module):
                 dtype=compute_dtype,
                 param_dtype=jnp.float32,
                 rngs=rngs,
+                **init_kwargs,
             )
 
     @property

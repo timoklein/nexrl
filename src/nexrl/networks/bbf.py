@@ -40,6 +40,8 @@ Dimension key:
     J: jumps (SPR prediction horizon)
 """
 
+from typing import Any
+
 import distrax
 import jax
 from flax import nnx
@@ -109,6 +111,7 @@ class BBFNetwork(nnx.Module):
         in_features: int = 0,
         *,
         compute_dtype: jnp.dtype = jnp.float32,
+        kernel_init: nnx.Initializer | None = None,
     ):
         self.action_dim = action_dim
         self.n_atoms = n_atoms
@@ -118,7 +121,13 @@ class BBFNetwork(nnx.Module):
         self._compute_dtype = compute_dtype
 
         # Linear/Conv compute in compute_dtype; params (master weights) stay fp32.
-        lin_kwargs = {"dtype": compute_dtype, "param_dtype": jnp.float32}
+        # kernel_init=None -> NNX default (lecun_normal); BBF passes xavier_uniform
+        # to match Schwarzer's reference (every conv/dense is xavier_uniform). This
+        # init also flows to the S&P reset's fresh draws (make_fresh_params builds a
+        # BBFNetwork with the same kwargs), so resets re-draw from the matched init.
+        lin_kwargs: dict[str, Any] = {"dtype": compute_dtype, "param_dtype": jnp.float32}
+        if kernel_init is not None:
+            lin_kwargs["kernel_init"] = kernel_init
 
         # --- Encoder (spatial) + shared projection ---
         if encoder is not None:

@@ -498,6 +498,13 @@ class BBFConfig(_BaseConfig):
     # Eval consumes RNG only at the final point, so training dynamics are identical to
     # a run with run_evaluation=False up to the last step.
     final_eval_only: bool = False
+    # Initialization scheme. False (default): Flax NNX defaults (lecun_normal kernels
+    # everywhere). True: xavier_uniform for EVERY conv/dense (encoder, transition convs,
+    # projection, predictor, value/advantage heads) — matching Schwarzer's reference
+    # (spr_networks.py initializer_type='xavier_uniform'). lecun/xavier std ratio is
+    # ~2.9x (first conv) to ~0.75x (projection/heads); the init also re-seeds every S&P
+    # reset (~18x/run), so it compounds. Audit finding #7.
+    xavier_init: bool = False
     # CNN encoder
     encoder_kwargs: CNNConfig | None = dataclasses.field(
         default_factory=lambda: CNNConfig(encoder="impala", features_dim=2048, width_scale=4)
