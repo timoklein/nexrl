@@ -87,9 +87,12 @@ def _evaluate_multi_lane(
     reordering hazard — making it safe both inside a jit'd training scan and in a
     Python outer loop.
     """
-    # Generous halting guarantee: each episode is truncated by the env's TimeLimit
-    # at <= max_steps_in_episode, so ep_idx reaches n_episodes well within this.
-    max_total_steps = n_episodes * max_steps_in_episode
+    # Play a FIXED n_episodes to completion so every slot in `returns`/`lengths`
+    # holds a real episode — no zero-filled slots to deflate the mean (the core of
+    # audit finding A). Each episode is force-terminated at `max_steps_in_episode`
+    # (see `step`), so a lane completes n_episodes within this loose backstop; it is
+    # defence-in-depth, not the binding guard (that is `ep_idx < n_episodes`).
+    max_total_steps = n_episodes * (max_steps_in_episode + 1)
 
     rng_reset, rng_eval = jax.random.split(rng)
     obs, env_state = env.reset_with_id(rng_reset, env_idx, env_params)
@@ -120,7 +123,14 @@ def _evaluate_multi_lane(
         # terminal_on_life_loss the env emits `done` per life but `info['real_done']`
         # only on game over; eval must report full-game returns (comparable to the
         # paper). Without the wrapper real_done == done, so this is unchanged.
-        boundary = info.get("real_done", done)
+        game_over = info.get("real_done", done)
+        # Per-episode truncation cap (audit finding A): guarantees every episode
+        # ends, so all n_episodes complete and the mean has no empty slots even for
+        # a strong policy that plays very long games. Mirrors the reference's 27000
+        # agent-step cap (BBF.gin:69). At Atari-100k it effectively never fires
+        # (Breakout games end far sooner); the rare "capped but not game_over" case
+        # (env not autoreset, next episode continues the same game) is an unhit corner.
+        boundary = jnp.logical_or(game_over, cur_length >= max_steps_in_episode)
 
         # On episode end, record this episode into slot ep_idx (guaranteed < n_episodes
         # by `cond`), then zero the accumulators and advance the episode counter.

@@ -379,6 +379,24 @@ def train_bbf(
     config.validate()
     env, env_params = create_env(config, env, env_params)
 
+    # Fix B (audit): evaluate on a DEDICATED set of env instances, never the live
+    # training instances. `evaluate` drives the env it is handed (reset_with_id +
+    # step); pointing it at the training env destroys each in-progress training
+    # episode, writes one physically-inconsistent max-priority transition per env
+    # per eval, and splices the running_return windows. A fresh multi-instance env
+    # (its own ALE instances — cheap) isolates eval from training, matching the
+    # reference's separate eval envs (eval_run_experiment.py:523-525). Pure-JAX
+    # (gymnax) envs are unaffected (evaluate uses independent vmap seeds), so this
+    # only clones the multi-instance (Atari/DMC) path; others keep sharing.
+    # Narrow the `eval_env` alias (not `env`) so the training env keeps its
+    # unnarrowed type for the action/obs-space queries just below.
+    eval_env = env
+    if config.run_evaluation:
+        from nexrl.compat.gymnasium2gymnax import MultiInstanceGymnasium2GymnaxEnv
+
+        if isinstance(eval_env, MultiInstanceGymnasium2GymnaxEnv):
+            eval_env = MultiInstanceGymnasium2GymnaxEnv(eval_env.make_fn, eval_env._num_envs, max_steps=eval_env._max_steps)
+
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
     obs_space = env.observation_space(env_params)
@@ -717,7 +735,7 @@ def train_bbf(
     # -----------------------------------------------------------------------
     def run_eval(q_net, rngs):
         act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=config.epsilon_eval), config, None)
-        return evaluate(act_fn, rngs(), env, env_params, 128, max_steps)
+        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
 
     # Reference acts with the EMA target net for BOTH collection and eval when
     # target_action_selection=True (spr_agent.py:1882-1884: select_params = target if

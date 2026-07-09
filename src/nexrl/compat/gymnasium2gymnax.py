@@ -248,9 +248,14 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
     num_envs independent env instances. State is just an _env_idx integer.
     """
 
-    def __init__(self, make_fn, num_envs: int = 1):
+    def __init__(self, make_fn, num_envs: int = 1, max_steps: int | None = None):
         self.make_fn = make_fn
         self._num_envs = num_envs
+        # Explicit per-episode step cap. ALE-v5 registers no ``max_episode_steps``
+        # on its spec, so without this ``default_params`` falls back to 1000 — far
+        # below a real Atari episode. Callers (e.g. ``create_atari``) pass the true
+        # frame cap (108000 frames / frame_skip). ``None`` keeps the spec fallback.
+        self._max_steps = max_steps
         self.envs = [make_fn() for _ in range(num_envs)]
         # Do an initial reset to determine shapes
         obs, _ = self.envs[0].reset(seed=0)
@@ -260,7 +265,7 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
     def default_params(self):
         from nexrl.compat._env_params import make_env_params
 
-        max_steps = getattr(self.envs[0].spec, "max_episode_steps", None) or 1000
+        max_steps = self._max_steps or getattr(self.envs[0].spec, "max_episode_steps", None) or 1000
         return make_env_params(max_steps)
 
     @cached_property
@@ -463,9 +468,11 @@ def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = F
     # Caller-supplied kwargs win.
     kwargs.setdefault("repeat_action_probability", 0.0)
 
+    frame_skip = 4
+
     def make_fn():
         env = gym.make(f"ALE/{env_name}", frameskip=1, **kwargs)
-        env = gym.wrappers.AtariPreprocessing(env, frame_skip=4, grayscale_obs=True, scale_obs=False)
+        env = gym.wrappers.AtariPreprocessing(env, frame_skip=frame_skip, grayscale_obs=True, scale_obs=False)
         env = gym.wrappers.FrameStackObservation(env, 4)
         if terminal_on_life_loss:
             # Above FrameStack, inside Autoreset (see EpisodicLifeEnv docstring).
@@ -473,7 +480,12 @@ def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = F
         env = Autoreset(env)
         return env
 
-    wrapped = MultiInstanceGymnasium2GymnaxEnv(make_fn, num_envs)
+    # Per-episode agent-step cap = ALE's 108000-frame limit / frame_skip = 27000
+    # (Dopamine/Schwarzer's BBF max_steps_per_episode; BBF.gin:69). ALE-v5 leaves
+    # spec.max_episode_steps=None, so pass it explicitly — otherwise eval falls back
+    # to a 1000-step cap that truncates real games and deflates eval returns.
+    max_steps = 108_000 // frame_skip
+    wrapped = MultiInstanceGymnasium2GymnaxEnv(make_fn, num_envs, max_steps=max_steps)
     return wrapped, wrapped.default_params
 
 
