@@ -17,15 +17,19 @@ class EvalState(NamedTuple):
 
 
 def evaluate_single(
-    act: ActFn,
+    act: Any,  # (obs, rng) -> action, or (agent_state, obs, rng) -> action when agent_state is passed
     env: GymnaxEnv,
     env_params: EnvParams,
     rng: jax.Array,
     max_steps_in_episode: int,
+    agent_state: Any = None,
 ) -> tuple[jax.Array, jax.Array]:
     def step(state):
         rng, rng_act, rng_step = jax.random.split(state.rng, 3)
-        action = act(state.last_obs, rng_act)
+        # `agent_state is None` is a trace-time branch: the default keeps act's (obs, rng)
+        # signature; the traced-params path uses (agent_state, obs, rng) so params flow as a
+        # runtime input rather than being baked in as compile-time constants.
+        action = act(state.last_obs, rng_act) if agent_state is None else act(agent_state, state.last_obs, rng_act)
         obs, env_state, reward, done, _ = env.step(rng_step, state.env_state, action, env_params)
         state = EvalState(
             rng=rng,
@@ -61,13 +65,14 @@ class _MultiLaneState(NamedTuple):
 
 
 def _evaluate_multi_lane(
-    act: ActFn,
+    act: Any,  # (obs, rng) -> action, or (agent_state, obs, rng) -> action when agent_state is passed
     env: GymnaxEnv,
     env_params: EnvParams,
     rng: jax.Array,
     env_idx: jax.Array,
     n_episodes: int,
     max_steps_in_episode: int,
+    agent_state: Any = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Play ``n_episodes`` sequential episodes on the single gymnasium instance
     bound to ``env_idx`` and return their per-episode (lengths, returns).
@@ -113,7 +118,7 @@ def _evaluate_multi_lane(
 
     def step(s: _MultiLaneState) -> _MultiLaneState:
         rng, rng_act, rng_step = jax.random.split(s.rng, 3)
-        action = act(s.last_obs, rng_act)
+        action = act(s.last_obs, rng_act) if agent_state is None else act(agent_state, s.last_obs, rng_act)
         obs, env_state, reward, done, info = env.step(rng_step, s.env_state, action, env_params)
 
         cur_return = s.cur_return + reward.squeeze()
@@ -164,6 +169,7 @@ def evaluate(
     env_params: EnvParams,
     num_seeds: int = 128,
     max_steps_in_episode: int | None = None,
+    agent_state: Any = None,
 ) -> EvalMetrics:
     """Evaluate a policy given by `act` on `num_seeds` environments.
 
@@ -189,8 +195,8 @@ def evaluate(
     # `evaluate_single` over `num_seeds` seeds. Unchanged from the original path.
     if getattr(env, "reset_with_id", None) is None:
         seeds = jax.random.split(rng, num_seeds)
-        vmap_collect = jax.vmap(evaluate_single, in_axes=(None, None, None, 0, None))
-        return vmap_collect(act, env, env_params, seeds, max_steps_in_episode)
+        vmap_collect = jax.vmap(evaluate_single, in_axes=(None, None, None, 0, None, None))
+        return vmap_collect(act, env, env_params, seeds, max_steps_in_episode, agent_state)
 
     # Multi-instance envs (Atari/DMC) expose only `num_envs` physical gymnasium
     # instances behind a `pure_callback`. The base `env.reset` hardcodes instance 0,
@@ -203,8 +209,8 @@ def evaluate(
     n_episodes = -(-num_seeds // n_inst)  # ceil division
     env_ids = jnp.arange(n_inst, dtype=jnp.int32)
     seeds = jax.random.split(rng, n_inst)
-    vmap_collect = jax.vmap(_evaluate_multi_lane, in_axes=(None, None, None, 0, 0, None, None))
+    vmap_collect = jax.vmap(_evaluate_multi_lane, in_axes=(None, None, None, 0, 0, None, None, None))
     # Both arrays are (n_inst, n_episodes).
-    lengths, returns = vmap_collect(act, env, env_params, seeds, env_ids, n_episodes, max_steps_in_episode)
+    lengths, returns = vmap_collect(act, env, env_params, seeds, env_ids, n_episodes, max_steps_in_episode, agent_state)
     # (n_inst, n_episodes) -> (n_inst * n_episodes,), trimmed to the requested count.
     return lengths.reshape(-1)[:num_seeds], returns.reshape(-1)[:num_seeds]

@@ -44,7 +44,6 @@ from nexrl.algos.utils import (
     create_encoder,
     create_env,
     create_vec_env_fns,
-    make_eval_act,
 )
 from nexrl.buffers import BBFReplayBuffer, Minibatch
 from nexrl.configs import BBFConfig
@@ -540,7 +539,11 @@ def train_bbf(
         next_features_BF = q_tgt.encode(next_obs_aug_BCHW)
         online_next_features_BF = q_net.encode(next_obs_aug_BCHW)
 
-        online_next_q_BA = jnp.sum(jax.nn.softmax(q_net.q_logits(online_next_features_BF), axis=-1) * support_N, axis=-1)
+        # Finding E: cast logits to fp32 before softmax, matching the CE-training site
+        # (~line 588) and the fp32 C51 target. bf16 softmax flips argmax between near-tied
+        # actions in this DDQN action selection, biasing the projected target distribution.
+        online_next_logits_BAN = q_net.q_logits(online_next_features_BF).astype(jnp.float32)
+        online_next_q_BA = jnp.sum(jax.nn.softmax(online_next_logits_BAN, axis=-1) * support_N, axis=-1)
         next_action_B = jnp.argmax(online_next_q_BA, axis=1)
 
         target_probs_BN = q_tgt.take_probs(next_features_BF, next_action_B)
@@ -733,10 +736,6 @@ def train_bbf(
     # -----------------------------------------------------------------------
     # Eval helper
     # -----------------------------------------------------------------------
-    def run_eval(q_net, rngs):
-        act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=config.epsilon_eval), config, None)
-        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
-
     # Reference acts with the EMA target net for BOTH collection and eval when
     # target_action_selection=True (spr_agent.py:1882-1884: select_params = target if
     # target_action_selection else online — independent of eval_mode). Our collection
@@ -745,6 +744,27 @@ def train_bbf(
     # should also reduce our single-eval-point variance. `target` is mutated in place by
     # the Polyak update, so this reference stays the live target across the loop.
     eval_net = target if config.target_action_selection else network
+
+    # Compile-once eval: pass the net PARAMS as a traced arg (`agent_state`) rather than
+    # closing over the live module. A closure bakes the params in as compile-time constants,
+    # so `evaluate` (whose `act` is a static jit arg) fully RECOMPILES and reallocates a
+    # fresh executable on every eval; those accumulate and OOM at eval time under memory
+    # pressure (co-tenant GPUs). Splitting the structure once gives `eval_act` a stable
+    # identity → a single compilation reused across evals; each eval merges the current
+    # params, supplied as a runtime input. Semantics are unchanged (identical computation),
+    # so eval numbers stay comparable. BBF has normalize_observations=False, so there is no
+    # obs_rms path (unlike make_eval_act).
+    eval_graphdef, _ = nnx.split(eval_net)
+
+    def eval_act(agent_state, obs, rng):
+        net = nnx.merge(eval_graphdef, agent_state)
+        obs = jnp.expand_dims(obs, 0)  # single-env obs -> batch of 1 (make_eval_act parity)
+        action = net.act(obs, rng, epsilon=config.epsilon_eval)
+        return jnp.squeeze(action)
+
+    def run_eval(q_net, rngs):
+        _, state = nnx.split(q_net)
+        return evaluate(eval_act, rngs(), eval_env, env_params, 128, max_steps, agent_state=state)
 
     # -----------------------------------------------------------------------
     # Python outer loop
