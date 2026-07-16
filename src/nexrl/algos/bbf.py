@@ -394,7 +394,16 @@ def train_bbf(
         from nexrl.compat.gymnasium2gymnax import MultiInstanceGymnasium2GymnaxEnv
 
         if isinstance(eval_env, MultiInstanceGymnasium2GymnaxEnv):
-            eval_env = MultiInstanceGymnasium2GymnaxEnv(eval_env.make_fn, eval_env._num_envs, max_steps=eval_env._max_steps)
+            # MUST propagate autoreset_in_step: `make_fn` for Atari builds NO gymnasium
+            # Autoreset wrapper (the adapter resets in-step instead), so a fresh instance
+            # left at the False default would never reset -> every eval lane sticks in a
+            # terminated env after its first game over, collapsing eval returns.
+            eval_env = MultiInstanceGymnasium2GymnaxEnv(
+                eval_env.make_fn,
+                eval_env._num_envs,
+                max_steps=eval_env._max_steps,
+                autoreset_in_step=eval_env._autoreset_in_step,
+            )
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)

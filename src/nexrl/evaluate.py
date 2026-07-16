@@ -82,10 +82,11 @@ def _evaluate_multi_lane(
     in a single vmap — extra lanes would alias an instance, the exact bug fixed
     here. Instead, vmap binds each lane to its own instance via ``reset_with_id``
     (``env_ids = arange(num_envs)``, mirroring ``create_vec_env_fns``), and each
-    lane plays its episodes back-to-back: when an episode ends, the gymnasium
-    ``Autoreset`` wrapper starts a fresh one on the next step (that reset step
-    yields ``reward=0, done=False``, so it does not corrupt the next return; it
-    only inflates the recorded length by 1).
+    lane plays its episodes back-to-back: the Atari adapter auto-resets in-step, so
+    the game-over step returns the fresh-episode reset obs as ``next_obs`` with
+    ``done/real_done=True`` — the loop records that episode's return on the
+    ``real_done`` boundary and the next step simply starts from the reset obs (no
+    phantom reset step, no length inflation).
 
     This is a single data-dependent ``while_loop`` chain per lane, so the
     side-effecting ``pure_callback`` steps are strictly ordered — no cross-round

@@ -1,6 +1,10 @@
 env: atari/Breakout-v5
 num_envs: 4
-buffer_size: 200000
+# 110000, not 200000: a 100k-env-step run stores exactly 100k transitions (25000 iters x 4
+# envs) and the circular buffer never wraps, so 110000 holds every transition with identical
+# indices/priorities/sampling as any larger capacity — byte-identical training. 200000's obs
+# array (5.26 GiB) plus its transient jit_collect copy OOMs a 40GB GPU.
+buffer_size: 110000
 fill_buffer: 2000
 batch_size: 32
 # num_epochs scaled with num_envs to keep RR=8 grad-steps per env-step
@@ -64,6 +68,12 @@ per_eps: 1.0e-6
 normalize_observations: false
 normalize_rewards: false
 run_evaluation: true
+# Skip the step-0 eval: on the UNTRAINED net the greedy policy is degenerate — if its fixed
+# argmax on the start frame isn't FIRE, the ball never launches and each of the 128 eval games
+# runs to the 27000-step cap, i.e. a multi-hour, useless eval (return ~0). Real evals (step>0)
+# play normal games that end on life loss. (Latent all along; the in-step-reset eval fix exposed
+# it — the old buggy eval env got stuck after 1 game/lane, hiding the cost.)
+skip_initial_evaluation: true
 # Encoder
 encoder_kwargs:
   encoder: impala
