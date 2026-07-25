@@ -293,6 +293,8 @@ class DQNConfig(_BaseConfig):
     eps_start: float = 1.0  # initial epsilon for epsilon-greedy
     eps_end: float = 0.01  # final epsilon
     exploration_fraction: float = 0.5  # fraction of training for epsilon decay
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     ddqn: bool = True  # use Double DQN for target computation
     normalize_observations: bool = False
     normalize_rewards: bool = False
@@ -322,6 +324,8 @@ class IQNConfig(_BaseConfig):
     eps_start: float = 1.0
     eps_end: float = 0.01
     exploration_fraction: float = 0.5
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     normalize_observations: bool = False
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
@@ -346,6 +350,8 @@ class PQNConfig(_BaseConfig):
     eps_start: float = 1.0
     eps_end: float = 0.05
     exploration_fraction: float = 0.1
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     normalize_observations: bool = False
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
@@ -373,6 +379,8 @@ class RainbowConfig(_BaseConfig):
     eps_start: float = 1.0
     eps_end: float = 0.01
     exploration_fraction: float = 0.5
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     # C51
     n_atoms: int = 51
     v_min: float = -10.0

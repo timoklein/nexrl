@@ -34,7 +34,7 @@ def _make_act(state, config=None):
 
     cfg = config or DQNConfig(**ARGS)
     model = state["q_network"]
-    return make_eval_act(lambda obs, rng: model.act(obs, rng, epsilon=0.005), cfg, state.get("obs_rms_state"))
+    return make_eval_act(lambda obs, rng: model.act(obs, rng, epsilon=cfg.epsilon_eval), cfg, state.get("obs_rms_state"))
 
 
 def test_env1():
