@@ -35,6 +35,7 @@ from nexrl.algos.utils import (
     calculate_gae,
     create_env,
     create_vec_env_fns,
+    make_eval_env,
     normalize_obs,
     ppo_lr_schedule,
     update_and_normalize_obs,
@@ -190,7 +191,21 @@ def _evaluate_rnn(
 
     Each eval episode: init zero hidden -> step with ac.act(hstate, obs, done, rng)
     -> carry new_hstate. Vmapped over num_seeds.
+
+    Pure-JAX envs only. Unlike `nexrl.evaluate.evaluate` this has no multi-lane path:
+    it vmaps `env.reset`, which on a multi-instance adapter hardcodes instance 0
+    (`gymnasium2gymnax.py`), so every one of `num_seeds` lanes would drive the same
+    physical emulator and the dynamics would be scrambled. Fail loudly rather than
+    return plausible-looking garbage — porting this to `_evaluate_multi_lane` means
+    threading the GRU hidden state through `_MultiLaneState`, which nothing needs yet
+    (`configs/ppo_rnn/` is gymnax + craftax only).
     """
+    if getattr(env, "reset_with_id", None) is not None:
+        raise NotImplementedError(
+            "ppo_rnn's hidden-state-carrying eval does not support multi-instance envs "
+            "(atari/*, dm_control/*): every vmapped lane would alias instance 0. Port "
+            "_evaluate_rnn onto nexrl.evaluate._evaluate_multi_lane before using one."
+        )
 
     def eval_single(rng: jax.Array) -> tuple[jax.Array, jax.Array]:
         rng_reset, rng_eval = jax.random.split(rng)
@@ -278,6 +293,8 @@ def train_ppo_rnn(
     """
     config.validate()
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     num_steps = config.num_steps
@@ -485,7 +502,7 @@ def train_ppo_rnn(
 
     # --- Eval callback ---
     def eval_callback(carry, ac, rngs):
-        return _evaluate_rnn(ac, rngs(), env, env_params, 128, max_steps, carry.obs_rms, config.normalize_observations)
+        return _evaluate_rnn(ac, rngs(), eval_env, env_params, 128, max_steps, carry.obs_rms, config.normalize_observations)
 
     # --- Outer training loop ---
     iteration_steps = num_envs * num_steps

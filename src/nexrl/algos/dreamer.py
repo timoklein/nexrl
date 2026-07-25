@@ -33,6 +33,7 @@ from nexrl.algos.utils import (
     _polyak_update,
     create_env,
     create_vec_env_fns,
+    make_eval_env,
     normalize_obs,
     resolve_network_kwargs,
     update_rew_rms,
@@ -293,6 +294,18 @@ def train_dreamer(
     """
     config.validate()
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
+    # `eval_single` below vmaps `eval_env.reset`, which on a multi-instance adapter hardcodes
+    # instance 0 — all 128 lanes would drive one emulator and the returns would be garbage.
+    # Fail loudly instead; a multi-lane port has to thread the RSSM carry through
+    # `_MultiLaneState`, which nothing needs yet (`configs/dreamer/` is gymnax only).
+    if getattr(eval_env, "reset_with_id", None) is not None:
+        raise NotImplementedError(
+            "dreamer's stateful RSSM eval does not support multi-instance envs "
+            "(atari/*, dm_control/*): every vmapped lane would alias instance 0. Port "
+            "eval_single onto nexrl.evaluate._evaluate_multi_lane before using one."
+        )
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
@@ -759,9 +772,12 @@ def train_dreamer(
 
     # --- Stateful eval with RSSM carry ---
     def eval_single(model_, obs_rms, rng_eval):
-        """Evaluate one episode maintaining RSSM state across steps."""
+        """Evaluate one episode maintaining RSSM state across steps.
+
+        Pure-JAX envs only — see the guard next to `eval_env` above.
+        """
         rng_reset, rng_ep = jax.random.split(rng_eval)
-        obs, env_st = env.reset(rng_reset, env_params)
+        obs, env_st = eval_env.reset(rng_reset, env_params)
         h, z = model_.rssm.initial_state(1)
         last_action = jnp.zeros((1, action_dim), dtype=jnp.float32)
 
@@ -789,7 +805,7 @@ def train_dreamer(
             feat = jnp.concatenate([h_new, z_new], axis=-1)
             action = model_.actor.act_greedy(feat)
             action_env = action.squeeze(0)
-            next_obs, new_env_st, reward, done, _ = env.step(rng_step, carry.env_st, action_env, env_params)
+            next_obs, new_env_st, reward, done, _ = eval_env.step(rng_step, carry.env_st, action_env, env_params)
             # Action for next RSSM step
             if discrete:
                 next_action = jax.nn.one_hot(action, action_dim, dtype=jnp.float32)  # keep (1, A)

@@ -30,6 +30,7 @@ from nexrl.algos.utils import (
     create_env,
     create_vec_env_fns,
     make_eval_act,
+    make_eval_env,
     ppo_lr_schedule,
     resolve_network_kwargs,
     shuffle_and_split,
@@ -189,6 +190,8 @@ def train_ppo(
     """
     config.validate()
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     num_steps = config.num_steps
@@ -377,7 +380,7 @@ def train_ppo(
     # --- Eval callback ---
     def eval_callback(carry, ac, rngs):
         act_fn = make_eval_act(lambda obs, rng: ac.act(obs, rng), config, carry.obs_rms)
-        return evaluate(act_fn, rngs(), env, env_params, 128, max_steps)
+        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
 
     # --- Outer training loop ---
     iteration_steps = num_envs * num_steps

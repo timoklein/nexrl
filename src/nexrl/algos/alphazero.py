@@ -31,6 +31,7 @@ from nexrl.algos.utils import (
     create_env,
     create_vec_env_fns,
     make_eval_act,
+    make_eval_env,
     normalize_obs,
     resolve_network_kwargs,
     update_rew_rms,
@@ -136,6 +137,8 @@ def train_alphazero(
     config.validate()
     # --- Setup (traced once) ---
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
@@ -375,7 +378,7 @@ def train_alphazero(
     # --- Eval callback ---
     def eval_callback(carry, actor_, rngs):
         act_fn = make_eval_act(lambda obs, rng: actor_.act(obs, rng), config, carry.obs_rms)
-        return evaluate(act_fn, rngs(), env, env_params, 128, max_steps)
+        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
 
     # --- Outer training loop ---
     steps_per_iter = int(np.ceil(config.eval_freq / num_envs))

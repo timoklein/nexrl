@@ -34,6 +34,7 @@ from nexrl.algos.utils import (
     _polyak_update,
     create_env,
     create_vec_env_fns,
+    make_eval_env,
     resolve_network_kwargs,
     update_rew_rms,
     update_rms,
@@ -276,6 +277,9 @@ def train_sgf(
     """
     config.validate()
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — SGF is Atari-only, whose multi-instance adapter is stateful,
+    # so sharing would destroy in-progress training episodes at every eval point.
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
@@ -881,7 +885,9 @@ def train_sgf(
     num_evals = int(np.ceil(config.total_timesteps / config.eval_freq))
 
     if config.run_evaluation and not config.skip_initial_evaluation:
-        eval_lengths, eval_returns = evaluate(env, env_params, eval_act, world_model, actor, rngs(), max_steps)
+        eval_lengths, eval_returns = evaluate(
+            lambda obs, rng: eval_act(world_model, actor, obs, rng), rngs(), eval_env, env_params, 128, max_steps
+        )
         initial_metrics = {
             "eval_lengths": eval_lengths,
             "eval_returns": eval_returns,
@@ -910,7 +916,9 @@ def train_sgf(
         train_return = carry.completed_returns_sum / jnp.maximum(carry.completed_returns_count, 1)
 
         if config.run_evaluation:
-            eval_lengths, eval_returns = evaluate(env, env_params, eval_act, wm_, actor_, rngs_(), max_steps)
+            eval_lengths, eval_returns = evaluate(
+                lambda obs, rng: eval_act(wm_, actor_, obs, rng), rngs_(), eval_env, env_params, 128, max_steps
+            )
         else:
             eval_lengths = jnp.zeros(128)
             eval_returns = jnp.zeros(128)
