@@ -139,7 +139,11 @@ class Gymnasium2GymnaxEnv(GymnaxEnv):
     def default_params(self):
         spec = self.env.spec
         param_dict = asdict(spec)
-        param_dict["max_steps_in_episode"] = param_dict.pop("max_episode_steps", 1000)
+        # `pop(key, 1000)` alone is not enough: `asdict(EnvSpec)` always emits
+        # `max_episode_steps`, with value None for envs that register no limit — so the
+        # pop default never fires and the params carry None, tripping `evaluate`'s
+        # `assert max_steps_in_episode is not None`. Fall back on the value, not the key.
+        param_dict["max_steps_in_episode"] = param_dict.pop("max_episode_steps", None) or 1000
         param_cls = type("Gymnasium2GymnaxEnvParams", (), param_dict)
         param_cls = struct.dataclass(param_cls)
         return param_cls()
@@ -288,11 +292,43 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         obs, _ = self.envs[0].reset(seed=0)
         self._obs_array = np.asarray(obs)
 
+    def clone(self) -> "MultiInstanceGymnasium2GymnaxEnv":
+        """Build a second set of instances with identical configuration.
+
+        ``self.envs`` holds live emulator handles mutated in place inside
+        ``pure_callback``, so anything that drives this env (notably evaluation)
+        destroys whatever episode the training loop has in flight. Callers that
+        need to step an env without disturbing training clone it first; see
+        ``nexrl.algos.utils.make_eval_env``.
+
+        Every constructor argument must be propagated, ``autoreset_in_step``
+        above all: ``create_atari``'s ``make_fn`` builds NO gymnasium
+        ``Autoreset`` wrapper (the adapter resets in-step instead), so a clone
+        left at the ``False`` default would never reset — every lane would stick
+        in a terminated env after its first game over and returns would collapse
+        to ~0. ``_max_steps`` is forwarded raw (possibly ``None``) rather than as
+        ``default_params.max_steps_in_episode``, which would bake in the spec
+        fallback and change DMC's semantics.
+        """
+        return type(self)(
+            self.make_fn,
+            self._num_envs,
+            max_steps=self._max_steps,
+            autoreset_in_step=self._autoreset_in_step,
+        )
+
     @property
     def default_params(self):
         from nexrl.compat._env_params import make_env_params
 
-        max_steps = self._max_steps or getattr(self.envs[0].spec, "max_episode_steps", None) or 1000
+        # `is not None` rather than truthiness: an explicit max_steps=0 must not
+        # silently fall through to the spec/1000 fallback. The remaining terms keep
+        # truthiness on purpose — ALE-v5 *has* a `max_episode_steps` attribute whose
+        # value is None, which must fall through to 1000.
+        if self._max_steps is not None:
+            max_steps = self._max_steps
+        else:
+            max_steps = getattr(self.envs[0].spec, "max_episode_steps", None) or 1000
         return make_env_params(max_steps)
 
     @cached_property

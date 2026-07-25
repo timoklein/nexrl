@@ -250,6 +250,38 @@ def create_env(
     return env, env_params  # type: ignore[return-value]
 
 
+def make_eval_env(env: Any, enabled: bool = True) -> Any:
+    """Return an env that evaluation can drive without disturbing training.
+
+    Multi-instance adapters (Atari, DMC) are stateful: their JAX "state" is just an
+    int index into a Python list of live gymnasium instances, mutated in place inside
+    `pure_callback`. `evaluate` drives the env it is handed (`reset_with_id` + `step`),
+    so pointing it at the training env destroys one in-progress training episode per
+    env per eval point and leaves training to resume from a stale `last_obs`. Cloning
+    gives eval its own instances, matching the reference's separate eval envs.
+
+    Pure-JAX envs (gymnax, brax, craftax, ...) are returned unchanged: their state is a
+    real pytree carried by the caller, so `evaluate` runs independent vmapped seeds and
+    sharing the env object is harmless.
+
+    `FloatObsWrapper` needs the explicit recursion. It forwards `reset_with_id` through
+    `__getattr__`, so `evaluate` still takes the multi-lane branch through it — but
+    `getattr(wrapper, "clone")` would resolve to the *inner* env's method and hand back
+    an unwrapped env, silently dropping the float cast.
+
+    Args:
+        env: The training env, as returned by `create_env`.
+        enabled: Pass `config.run_evaluation` — when eval is off, skip building a second
+            set of emulator instances.
+    """
+    if not enabled:
+        return env
+    if isinstance(env, FloatObsWrapper):
+        return FloatObsWrapper(make_eval_env(env.env, True))
+    clone = getattr(env, "clone", None)
+    return env if clone is None else clone()
+
+
 def create_encoder(
     encoder_config: CNNConfig,
     obs_shape: tuple[int, ...],

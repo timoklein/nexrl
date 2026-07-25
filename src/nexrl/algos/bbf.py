@@ -44,6 +44,7 @@ from nexrl.algos.utils import (
     create_encoder,
     create_env,
     create_vec_env_fns,
+    make_eval_env,
 )
 from nexrl.buffers import BBFReplayBuffer, Minibatch
 from nexrl.configs import BBFConfig
@@ -379,31 +380,11 @@ def train_bbf(
     env, env_params = create_env(config, env, env_params)
 
     # Fix B (audit): evaluate on a DEDICATED set of env instances, never the live
-    # training instances. `evaluate` drives the env it is handed (reset_with_id +
-    # step); pointing it at the training env destroys each in-progress training
-    # episode, writes one physically-inconsistent max-priority transition per env
-    # per eval, and splices the running_return windows. A fresh multi-instance env
-    # (its own ALE instances — cheap) isolates eval from training, matching the
-    # reference's separate eval envs (eval_run_experiment.py:523-525). Pure-JAX
-    # (gymnax) envs are unaffected (evaluate uses independent vmap seeds), so this
-    # only clones the multi-instance (Atari/DMC) path; others keep sharing.
-    # Narrow the `eval_env` alias (not `env`) so the training env keeps its
-    # unnarrowed type for the action/obs-space queries just below.
-    eval_env = env
-    if config.run_evaluation:
-        from nexrl.compat.gymnasium2gymnax import MultiInstanceGymnasium2GymnaxEnv
-
-        if isinstance(eval_env, MultiInstanceGymnasium2GymnaxEnv):
-            # MUST propagate autoreset_in_step: `make_fn` for Atari builds NO gymnasium
-            # Autoreset wrapper (the adapter resets in-step instead), so a fresh instance
-            # left at the False default would never reset -> every eval lane sticks in a
-            # terminated env after its first game over, collapsing eval returns.
-            eval_env = MultiInstanceGymnasium2GymnaxEnv(
-                eval_env.make_fn,
-                eval_env._num_envs,
-                max_steps=eval_env._max_steps,
-                autoreset_in_step=eval_env._autoreset_in_step,
-            )
+    # training instances. Pointing eval at the training env destroys each in-progress
+    # training episode, writes one physically-inconsistent max-priority transition per
+    # env per eval, and splices the running_return windows. Matches the reference's
+    # separate eval envs (eval_run_experiment.py:523-525).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
