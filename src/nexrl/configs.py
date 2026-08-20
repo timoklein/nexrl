@@ -303,6 +303,53 @@ class DQNConfig(_BaseConfig):
 
 
 @dataclasses.dataclass(frozen=True)
+class DrQConfig(_BaseConfig):
+    """DrQ (Kostrikov et al. 2021), discrete Atari-100k variant.
+
+    Reference: google/dopamine labs/atari_100k DrQ.gin — Double + Dueling DQN,
+    n-step 10, one random-shift + intensity augmentation per sampled obs/next_obs.
+    """
+
+    env: str = "atari/Breakout-v5"
+    agent: str = "DuelingQNetwork"  # DrQ.gin: dueling = True
+    agent_kwargs: NetworkConfig = dataclasses.field(default_factory=NetworkConfig)
+    num_envs: int = 1  # Dopamine runs a single env
+    # 110000 holds all 100k transitions of an Atari-100k run without wrapping — identical
+    # training to the gin's 1M capacity, without the OOM (see configs/bbf/atari/breakout.yaml).
+    buffer_size: int = 110_000
+    fill_buffer: int = 1_600  # min_replay_history
+    batch_size: int = 32
+    num_epochs: int = 1  # update_period=1, num_updates_per_train_step=1 -> replay ratio 1
+    learning_rate: float = 0.0001
+    adam_eps: float = 1.5e-4  # Dopamine create_optimizer eps (NOT the optax 1e-8 default)
+    max_grad_norm: float = float("inf")  # Dopamine DrQ does not clip gradients
+    total_timesteps: int = 100_000
+    eval_freq: int = 10_000
+    gamma: float = 0.99
+    n_step: int = 10  # update_horizon
+    # target_update_freq=1 takes the polyak branch of maybe_update_targets; polyak=0.0
+    # degenerates it to a HARD copy every env step == Dopamine target_update_period=1
+    # at replay ratio 1. Tuning polyak away from 0.0 silently breaks reference fidelity.
+    polyak: float = 0.0
+    target_update_freq: int = 1
+    epsilon_train: float = 0.1
+    epsilon_eval: float = 0.05
+    epsilon_decay_period: int = 5_000  # env steps of linear decay AFTER buffer fill
+    ddqn: bool = True  # DrQ.gin: double_dqn = True
+    # The ONE DrQ augmentation: random shift (edge-pad shift_pad, per-image offset in
+    # [0, 2*shift_pad) — Dopamine _per_image_random_crop) then per-image intensity noise.
+    data_augmentation: bool = True
+    shift_pad: int = 4
+    intensity_scale: float = 0.05
+    terminal_on_life_loss: bool = False  # set true for Atari; create_env plumbs it
+    clip_rewards: bool = True  # clip training rewards to [-1, 1]; metrics stay raw
+    normalize_observations: bool = False
+    normalize_rewards: bool = False
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class IQNConfig(_BaseConfig):
     env: str = "CartPole-v1"
     agent_kwargs: NetworkConfig = dataclasses.field(default_factory=NetworkConfig)
@@ -950,6 +997,7 @@ ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "alphazero": AlphaZeroConfig,
     "bbf": BBFConfig,
     "dreamer": DreamerConfig,
+    "drq": DrQConfig,
     "drqv2": DrQV2Config,
     "mrq": MrQConfig,
     "mrsq": MrsQConfig,

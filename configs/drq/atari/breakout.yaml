@@ -1,0 +1,48 @@
+# DrQ Atari-100k (google/dopamine labs/atari_100k DrQ.gin)
+env: atari/Breakout-v5
+agent: DuelingQNetwork
+agent_kwargs:
+  activation: relu
+  hidden_layer_sizes: [512]
+encoder_kwargs:
+  encoder: nature
+  features_dim: 512
+num_envs: 1
+# 110000, not the gin's 1M: a 100k-env-step run stores exactly 100k transitions, so the
+# circular buffer never wraps and 110000 holds every transition with identical
+# indices/sampling as any larger capacity — byte-identical training. A 1M uint8 obs
+# array (x2 for next_obs) OOMs a 40GB GPU (see configs/bbf/atari/breakout.yaml).
+buffer_size: 110000
+fill_buffer: 1600
+batch_size: 32
+num_epochs: 1
+learning_rate: 1.0e-4
+adam_eps: 1.5e-4
+total_timesteps: 100000
+eval_freq: 10000
+gamma: 0.99
+n_step: 10
+# target_update_freq=1 + polyak=0.0 == HARD target copy every env step (Dopamine
+# target_update_period=1 at replay ratio 1). Do not "tune" polyak here — any value
+# other than 0.0 silently replaces the reference hard copy with an EMA.
+polyak: 0.0
+target_update_freq: 1
+epsilon_train: 0.1
+epsilon_eval: 0.05
+epsilon_decay_period: 5000
+ddqn: true
+data_augmentation: true
+shift_pad: 4
+intensity_scale: 0.05
+# Per-life agent terminal (bootstrap cut at life loss), game continues across lives;
+# train_return/eval stay full-game. Matches DrQ.gin terminal_on_life_loss=True.
+terminal_on_life_loss: true
+# Reward clipping to [-1,1] for training (buffer/targets); train_return stays raw
+clip_rewards: true
+normalize_observations: false
+normalize_rewards: false
+run_evaluation: true
+# Skip the step-0 eval: on the UNTRAINED net the greedy policy is degenerate — if its
+# fixed argmax on the start frame isn't FIRE, the ball never launches and each eval game
+# runs to the 27000-step cap, i.e. a multi-hour, useless eval (return ~0).
+skip_initial_evaluation: true

@@ -5,13 +5,14 @@ Off-policy continuous: sac, sac_simba, td3, mpo_continuous
 Off-policy discrete: dqn, iqn, pqn, rainbow, mpo
 Model-based: alphazero, muzero, dreamer, sgf
 Off-policy dual-mode: mrq, mrsq
-Off-policy visual: drqv2
+Off-policy visual: drq, drqv2, bbf
 """
 
 from .alphazero import train_alphazero
 from .bbf import train_bbf
 from .dqn import train_dqn
 from .dreamer import train_dreamer
+from .drq import train_drq
 from .drqv2 import train_drqv2
 from .iqn import train_iqn
 from .mpo import train_mpo
@@ -40,6 +41,7 @@ __all__ = [
     "train_bbf",
     "train_dqn",
     "train_dreamer",
+    "train_drq",
     "train_drqv2",
     "train_iqn",
     "train_mpo",
