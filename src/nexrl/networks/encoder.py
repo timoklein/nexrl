@@ -44,9 +44,13 @@ class NatureCNNEncoder(nnx.Module):
         rngs: nnx.Rngs,
         *,
         compute_dtype: jnp.dtype = jnp.float32,
+        kernel_init: nnx.Initializer | None = None,
     ):
         self._features_dim = features_dim
         self._compute_dtype = compute_dtype
+        # kernel_init=None -> NNX default (lecun_normal), preserving behavior for
+        # existing callers; DrQ/Dopamine-reference callers pass xavier_uniform.
+        init_kwargs: dict[str, Any] = {} if kernel_init is None else {"kernel_init": kernel_init}
         self.conv1 = nnx.Conv(
             in_features=in_channels,
             out_features=32,
@@ -56,6 +60,7 @@ class NatureCNNEncoder(nnx.Module):
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
+            **init_kwargs,
         )
         self.conv2 = nnx.Conv(
             in_features=32,
@@ -66,6 +71,7 @@ class NatureCNNEncoder(nnx.Module):
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
+            **init_kwargs,
         )
         self.conv3 = nnx.Conv(
             in_features=64,
@@ -76,6 +82,7 @@ class NatureCNNEncoder(nnx.Module):
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
+            **init_kwargs,
         )
 
         # Compute flattened size after convolutions (VALID padding is nnx.Conv default)
@@ -89,6 +96,7 @@ class NatureCNNEncoder(nnx.Module):
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
+            **init_kwargs,
         )
 
     @property

@@ -77,12 +77,14 @@ class DiscreteQNetwork(nnx.Module):
         activation: Callable,
         rngs: nnx.Rngs,
         encoder: nnx.Module | None = None,
+        kernel_init: nnx.Initializer | None = None,
     ):
         self.encoder = encoder
         self.action_dim = action_dim
         effective_in = encoder.features_dim if encoder else in_features
-        self.mlp = MLP(effective_in, hidden_layer_sizes, activation, rngs)
-        self.q_head = nnx.Linear(hidden_layer_sizes[-1], action_dim, rngs=rngs)
+        init_kwargs = {} if kernel_init is None else {"kernel_init": kernel_init}
+        self.mlp = MLP(effective_in, hidden_layer_sizes, activation, rngs, kernel_init=kernel_init)
+        self.q_head = nnx.Linear(hidden_layer_sizes[-1], action_dim, rngs=rngs, **init_kwargs)
 
     def __call__(self, obs: jax.Array) -> jax.Array:
         x = self.encoder(obs) if self.encoder else obs
@@ -112,13 +114,17 @@ class DuelingQNetwork(nnx.Module):
         activation: Callable,
         rngs: nnx.Rngs,
         encoder: nnx.Module | None = None,
+        kernel_init: nnx.Initializer | None = None,
     ):
         self.encoder = encoder
         self.action_dim = action_dim
         effective_in = encoder.features_dim if encoder else in_features
-        self.mlp = MLP(effective_in, hidden_layer_sizes, activation, rngs)
-        self.value_head = nnx.Linear(hidden_layer_sizes[-1], 1, rngs=rngs)
-        self.advantage_head = nnx.Linear(hidden_layer_sizes[-1], action_dim, rngs=rngs)
+        # kernel_init=None -> NNX default (lecun_normal); DrQ passes xavier_uniform to
+        # match Dopamine's FullRainbowNetwork (xavier on every conv/dense).
+        init_kwargs = {} if kernel_init is None else {"kernel_init": kernel_init}
+        self.mlp = MLP(effective_in, hidden_layer_sizes, activation, rngs, kernel_init=kernel_init)
+        self.value_head = nnx.Linear(hidden_layer_sizes[-1], 1, rngs=rngs, **init_kwargs)
+        self.advantage_head = nnx.Linear(hidden_layer_sizes[-1], action_dim, rngs=rngs, **init_kwargs)
 
     def __call__(self, obs: jax.Array) -> jax.Array:
         x = self.encoder(obs) if self.encoder else obs

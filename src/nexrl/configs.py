@@ -336,6 +336,10 @@ class DrQConfig(_BaseConfig):
     epsilon_eval: float = 0.05
     epsilon_decay_period: int = 5_000  # env steps of linear decay AFTER buffer fill
     ddqn: bool = True  # DrQ.gin: double_dqn = True
+    # False: NNX default init (lecun_normal everywhere). True: xavier_uniform for EVERY
+    # conv/dense (encoder + MLP + dueling heads) — the reference default: Dopamine's
+    # FullRainbowNetwork uses nn.initializers.xavier_uniform() on every layer.
+    xavier_init: bool = False
     # The ONE DrQ augmentation: random shift (edge-pad shift_pad, per-image offset in
     # [0, 2*shift_pad) — Dopamine _per_image_random_crop) then per-image intensity noise.
     data_augmentation: bool = True

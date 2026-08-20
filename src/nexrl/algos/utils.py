@@ -303,7 +303,8 @@ def create_encoder(
             latent instead of flat features (BBF convolutional SPR path).
         kernel_init: Conv/Dense kernel initializer. None (default) keeps the NNX
             default (lecun_normal) so PPO/SGF/etc. callers are unchanged; BBF passes
-            xavier_uniform to match Schwarzer's reference (IMPALA encoder only).
+            xavier_uniform to match Schwarzer's reference; DrQ passes it for the
+            nature encoder (Dopamine xavier-everywhere).
     """
     in_channels, height, width = obs_shape[0], obs_shape[1], obs_shape[2]
     if encoder_config.encoder == "nature":
@@ -316,6 +317,7 @@ def create_encoder(
             features_dim=encoder_config.features_dim,
             rngs=rngs,
             compute_dtype=compute_dtype,
+            kernel_init=kernel_init,
         )
     elif encoder_config.encoder == "impala":
         return ImpalaCNNEncoder(

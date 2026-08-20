@@ -131,11 +131,22 @@ def _create_networks(
     obs_space = env.observation_space(env_params)
     in_features = int(np.prod(obs_space.shape))
 
-    q_kwargs = {"in_features": in_features, "action_dim": action_dim, **agent_kwargs}
+    # xavier_uniform on every conv/dense matches Dopamine's FullRainbowNetwork;
+    # None keeps the NNX default (lecun_normal) so existing runs are unchanged.
+    kernel_init = nnx.initializers.xavier_uniform() if config.xavier_init else None
+    q_kwargs = {"in_features": in_features, "action_dim": action_dim, "kernel_init": kernel_init, **agent_kwargs}
 
     rngs = nnx.Rngs(rng)
-    q_encoder = create_encoder(config.encoder_kwargs, obs_space.shape, rngs) if config.encoder_kwargs else None
-    qt_encoder = create_encoder(config.encoder_kwargs, obs_space.shape, rngs) if config.encoder_kwargs else None
+    q_encoder = (
+        create_encoder(config.encoder_kwargs, obs_space.shape, rngs, kernel_init=kernel_init)
+        if config.encoder_kwargs
+        else None
+    )
+    qt_encoder = (
+        create_encoder(config.encoder_kwargs, obs_space.shape, rngs, kernel_init=kernel_init)
+        if config.encoder_kwargs
+        else None
+    )
     q_network = agent_cls(**q_kwargs, encoder=q_encoder, rngs=rngs)
     q_target = agent_cls(**q_kwargs, encoder=qt_encoder, rngs=rngs)
     # Target starts as an exact copy of the online net (Dopamine syncs at construction).

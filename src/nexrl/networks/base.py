@@ -47,12 +47,16 @@ class MLP(nnx.Module):
         hidden_layer_sizes: Sequence[int],
         activation: Callable,
         rngs: nnx.Rngs,
+        *,
+        kernel_init: nnx.Initializer | None = None,
     ):
         self.activation = activation
+        # kernel_init=None -> NNX default (lecun_normal), preserving existing callers.
+        init_kwargs = {} if kernel_init is None else {"kernel_init": kernel_init}
         layers = []
         current_in = in_features
         for size in hidden_layer_sizes:
-            layers.append(nnx.Linear(current_in, size, rngs=rngs))
+            layers.append(nnx.Linear(current_in, size, rngs=rngs, **init_kwargs))
             current_in = size
         self.layers = nnx.List(layers)
 
