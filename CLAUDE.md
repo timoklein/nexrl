@@ -183,7 +183,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **Reference is Dopamine labs/atari_100k DrQ.gin**, not the PyTorch SAC release: Double + Dueling DQN, n-step 10, ONE shift+intensity augmentation each for obs/next_obs (no K/M target averaging — that's the DMC variant). Loss is **Huber**, not MSE.
 - **Augmentation dtype order**: `random_shift` on uint8 (precision-free crop), `random_intensity` promotes to float32, encoder's `/255` after — commutes with Dopamine's float-first order. `max_offset=2*shift_pad` (full-range offsets, exclusive) matches `_per_image_random_crop`.
 - **`polyak=0.0` + `target_update_freq=1` encodes a HARD target copy every env step** (Dopamine `target_update_period=1` at RR=1) via `maybe_update_targets`'s freq==1 polyak branch. Tuning polyak away from 0.0 silently breaks fidelity.
-- **n-step warmup rows**: first n−1 transitions per life enter the uniform buffer with reward masked 0 (same trade-off as DrQ-v2/Rainbow; Dopamine gates serving instead).
+- **Sample-time n-step** (`ReplayBuffer.sample_nstep`): buffer stores 1-step rows; truncated n-step returns are built when a batch is sampled, matching Dopamine. This serves the last n−1 pre-terminal transitions with done=True targets and stores no masked filler rows — the at-insert ring (still used by DrQ-v2/Rainbow) drops those windows, giving 10× sparser terminal signal.
 - Epsilon anneal starts AFTER buffer fill (`_anneal_epsilon`), not from step 0.
 
 ### DrQ-v2

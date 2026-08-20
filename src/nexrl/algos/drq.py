@@ -10,6 +10,11 @@ augmentation applied independently to the sampled obs and next_obs inside the
 train step (no K/M target averaging — that is the DMC/SAC variant). The buffer
 stores raw uint8 frames; action selection and evaluation see unaugmented frames.
 
+The buffer stores plain 1-step transitions and n-step returns are computed at
+SAMPLE time (``ReplayBuffer.sample_nstep``), matching Dopamine's buffer: every
+stored row is a valid window start, so the last n-1 transitions before each
+life/game terminal are served with truncated returns and done=True.
+
 Dimension key:
     B: batch (num_envs during collection, batch_size during updates)
     A: action dimension (num_actions)
@@ -42,7 +47,7 @@ from nexrl.algos.utils import (
     update_rew_rms,
     update_rms,
 )
-from nexrl.buffers import Minibatch, NStepState, ReplayBuffer, create_nstep_state
+from nexrl.buffers import Minibatch, ReplayBuffer
 from nexrl.configs import DrQConfig
 from nexrl.evaluate import evaluate
 from nexrl.networks import DiscreteQNetwork, DuelingQNetwork
@@ -61,7 +66,6 @@ class DrQCarry(NamedTuple):
     last_done: chex.Array
     global_step: int
     replay_buffer: ReplayBuffer
-    n_step_state: NStepState
     obs_rms: RMSState
     rew_rms: RewardRMSState
     train_metrics: dict
@@ -112,94 +116,6 @@ def _eval_estimators(lengths_E: jax.Array, returns_E: jax.Array, budget: int) ->
     n_used = jnp.sum(included_E)
     paper_mean = jnp.sum(returns_E * included_E) / jnp.maximum(n_used, 1)
     return paper_mean, n_used.astype(jnp.float32)
-
-
-def _compute_nstep_transition(
-    nss: NStepState,
-    obs: jax.Array,
-    action: jax.Array,
-    reward: jax.Array,
-    done: jax.Array,
-    next_obs: jax.Array,
-    n_step: int,
-    gamma: float,
-) -> tuple[NStepState, Minibatch, jax.Array]:
-    """Write transition to n-step ring buffer and compute n-step returns when ready.
-
-    Returns (updated_nss, n_step_minibatch, ready_mask_B).
-    Non-ready entries get a dummy minibatch (reward is masked to 0 by the caller).
-    """
-    num_envs = obs.shape[0]
-    w = nss.write_idx % n_step
-
-    # Write new transition into ring buffer
-    new_obs = nss.obs.at[w].set(obs)
-    new_action = nss.action.at[w].set(action)
-    new_reward = nss.reward.at[w].set(reward)
-    new_done = nss.done.at[w].set(done)
-    new_next_obs = nss.next_obs.at[w].set(next_obs)
-    new_count = nss.count + 1
-
-    # Reset count for envs that terminated in this step
-    new_count = jnp.where(done, jnp.int32(1), new_count)
-
-    nss = NStepState(
-        obs=new_obs,
-        action=new_action,
-        reward=new_reward,
-        done=new_done,
-        next_obs=new_next_obs,
-        write_idx=nss.write_idx + 1,
-        count=new_count,  # pyright: ignore[reportArgumentType]
-    )
-
-    # Which envs have enough data for an n-step transition
-    ready_B = new_count >= n_step  # pyright: ignore[reportOperatorIssue]
-
-    # Compute n-step discounted return, truncating at episode boundaries
-    # Read oldest entry first (write_idx points to next write, so oldest is write_idx - n_step + 1)
-    # After increment, oldest is at (write_idx - n_step) % n_step = (nss.write_idx - n_step) % n_step
-    oldest_idx = (nss.write_idx - n_step) % n_step
-
-    # Gather n-step returns in chronological order
-    indices = (oldest_idx + jnp.arange(n_step)) % n_step
-
-    # n_step_obs is the obs from oldest step
-    n_step_obs = nss.obs[indices[0]]  # (num_envs, *obs_shape)
-    n_step_action = nss.action[indices[0]]  # (num_envs, *action_shape)
-
-    # Compute discounted return and find effective next_obs
-    # We iterate from oldest to newest, accumulating reward with truncation at done
-    def _accumulate_return(carry, idx):
-        """Scan over n-step window accumulating discounted rewards."""
-        running_return, effective_next_obs, effective_done = carry
-        r = nss.reward[idx]  # (num_envs,)
-        d = nss.done[idx]  # (num_envs,)
-        no = nss.next_obs[idx]  # (num_envs, *obs_shape)
-
-        # If this step is terminal, truncate: return = running + r, done = True
-        running_return = running_return * gamma * (1.0 - effective_done) + r
-        # Update effective next_obs and done to latest non-truncated step
-        effective_next_obs = jnp.where(effective_done.reshape((num_envs,) + (1,) * (no.ndim - 1)), effective_next_obs, no)
-        effective_done = jnp.logical_or(effective_done, d)
-        return (running_return, effective_next_obs, effective_done), None
-
-    init_carry = (
-        jnp.zeros(num_envs, dtype=jnp.float32),
-        nss.next_obs[indices[-1]],  # default: newest next_obs
-        jnp.zeros(num_envs, dtype=bool),
-    )
-    (n_step_return, n_step_next_obs, n_step_done), _ = jax.lax.scan(_accumulate_return, init_carry, indices)
-
-    n_step_mb = Minibatch(
-        obs=n_step_obs,
-        action=n_step_action,
-        reward=n_step_return,
-        done=n_step_done,
-        next_obs=n_step_next_obs,  # pyright: ignore[reportArgumentType]
-    )
-
-    return nss, n_step_mb, ready_B
 
 
 def _create_networks(
@@ -290,7 +206,8 @@ def train_drq(
     assert discrete, "DrQ requires discrete action space"
 
     # n-step bootstrap discount, applied once at the window end (episode-internal
-    # truncation is handled inside _compute_nstep_transition via the done mask).
+    # truncation is handled inside ReplayBuffer.sample_nstep via the done mask;
+    # truncated windows return done=True, which zeroes the bootstrap entirely).
     gamma_n = config.gamma**config.n_step
 
     vmap_step, vmap_reset = create_vec_env_fns(env, config)
@@ -306,16 +223,8 @@ def train_drq(
     obs_rms = RMSState.create(obs_space.shape)
     rew_rms = RewardRMSState.create(num_envs)
 
-    # Init replay buffer + n-step ring (obs_dtype from the space keeps Atari frames uint8)
+    # Init replay buffer (1-step rows; obs stay uint8 via the space's dtype)
     buf = ReplayBuffer.empty(config.buffer_size, obs_space, action_space)
-    nss = create_nstep_state(
-        n_step=config.n_step,
-        num_envs=num_envs,
-        obs_shape=obs_space.shape,
-        action_shape=action_space.shape,
-        obs_dtype=obs_space.dtype,
-        action_dtype=jnp.int32,
-    )
 
     zero_train_metrics = {k: jnp.float32(0.0) for k in _DRQ_METRIC_NAMES}
 
@@ -325,7 +234,6 @@ def train_drq(
         last_done=jnp.zeros(num_envs, dtype=bool),
         global_step=0,
         replay_buffer=buf,
-        n_step_state=nss,
         obs_rms=obs_rms,
         rew_rms=rew_rms,
         train_metrics=zero_train_metrics,
@@ -381,34 +289,29 @@ def train_drq(
         if config.normalize_rewards:
             rew_rms = update_rew_rms(rew_rms, rewards, dones, config.gamma)
 
-        # Accumulate into the n-step ring; the emitted transition is the one n steps back.
-        # Non-ready rows (first n-1 steps of each life/episode) are still inserted with
-        # reward masked to 0 — a negligible fraction of a uniform buffer (drqv2/rainbow
-        # accept the same trade-off; Dopamine instead gates serving, which our fixed-shape
-        # extend path cannot express).
-        new_nss, nstep_mb, ready_B = _compute_nstep_transition(
-            carry.n_step_state, carry.last_obs, actions, train_rewards, agent_dones, next_obs, config.n_step, config.gamma
-        )
-        masked_mb = Minibatch(
-            obs=nstep_mb.obs,
-            action=nstep_mb.action,
-            reward=jnp.where(ready_B, nstep_mb.reward, 0.0),
-            done=nstep_mb.done,
-            next_obs=nstep_mb.next_obs,
+        # Store the plain 1-step transition; n-step returns are computed at SAMPLE
+        # time (ReplayBuffer.sample_nstep). This serves the last n-1 transitions
+        # before each life/game terminal with truncated returns (an at-insert ring
+        # drops them — 10x sparser terminal signal) and stores no masked filler rows.
+        transition = Minibatch(
+            obs=carry.last_obs,
+            action=actions,
+            reward=train_rewards,
+            done=agent_dones,
+            next_obs=next_obs,
         )
 
         carry = carry._replace(
             last_obs=next_obs,
             env_state=new_env_state,
             global_step=carry.global_step + num_envs,
-            n_step_state=new_nss,
             obs_rms=obs_rms,
             rew_rms=rew_rms,
             running_return=reset_running_B,
             completed_returns_sum=completed_sum,
             completed_returns_count=completed_count,
         )
-        return carry, masked_mb
+        return carry, transition
 
     # --- Update Q-network ---
     def update_q(mb, q_net, q_opt, q_target, rngs):
@@ -471,7 +374,9 @@ def train_drq(
 
         def update_iteration(_, state):
             carry, q_net, q_opt, q_tgt, rngs, metrics_sum = state
-            minibatch = carry.replay_buffer.sample(config.batch_size, rngs())
+            minibatch = carry.replay_buffer.sample_nstep(
+                config.batch_size, rngs(), n_step=config.n_step, stride=config.num_envs, gamma=config.gamma
+            )
             minibatch = normalize_minibatch(minibatch, config, carry.obs_rms, carry.rew_rms)
             td_loss, mean_q = update_q(minibatch, q_net, q_opt, q_tgt, rngs)
             metrics_sum = jax.tree.map(lambda s, m: s + m, metrics_sum, {"td_loss": td_loss, "mean_q_value": mean_q})

@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from nexrl import DrQConfig, train_drq
@@ -110,6 +111,57 @@ def test_env5():
 
     for o, a in zip(obs, actions):
         assert (a > 0.5) == (o > 0)
+
+
+def test_sample_nstep_truncation():
+    """Sample-time n-step returns: truncation at terminals, hand-computed.
+
+    Fills a buffer with transitions whose obs encode their index, then checks every
+    sampled window against a Python re-computation: discounted sum truncated at the
+    first terminal (terminal reward included), done=True iff the window contains a
+    terminal, next_obs taken at the truncation point.
+    """
+    from gymnax.environments import spaces
+
+    from nexrl.buffers import Minibatch, ReplayBuffer
+
+    obs_space = spaces.Box(low=0.0, high=200.0, shape=(1,), dtype=jnp.float32)
+    action_space = spaces.Discrete(2)
+    buf = ReplayBuffer.empty(16, obs_space, action_space)
+
+    T = 12
+    obs_T1 = jnp.arange(T, dtype=jnp.float32)[:, None]
+    batch = Minibatch(
+        obs=obs_T1,
+        action=jnp.zeros(T, dtype=jnp.int32),
+        reward=jnp.arange(T, dtype=jnp.float32),
+        done=jnp.zeros(T, dtype=bool).at[4].set(True).at[9].set(True),
+        next_obs=obs_T1 + 100.0,
+    )
+    buf = buf.extend(batch)
+
+    n_step, gamma = 3, 0.9
+    num = 256
+    mb = buf.sample_nstep(num, jax.random.PRNGKey(0), n_step=n_step, stride=1, gamma=gamma)
+
+    rewards = np.arange(T, dtype=np.float64)
+    dones = np.zeros(T, dtype=bool)
+    dones[[4, 9]] = True
+    starts_B = np.asarray(mb.obs[:, 0]).astype(int)  # obs value == buffer index
+    # Valid starts keep the whole window inside the stored data
+    assert starts_B.max() <= T - n_step
+    assert starts_B.min() >= 0
+    for b in range(num):
+        s = starts_B[b]
+        expected_return, expected_done, last = 0.0, False, s + n_step - 1
+        for k in range(n_step):
+            expected_return += gamma**k * rewards[s + k]
+            if dones[s + k]:
+                expected_done, last = True, s + k
+                break
+        assert mb.reward[b] == pytest.approx(expected_return, rel=1e-5)
+        assert bool(mb.done[b]) == expected_done
+        assert mb.next_obs[b, 0] == pytest.approx(100.0 + last)
 
 
 # ---------------------------------------------------------------------------
