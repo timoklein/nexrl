@@ -89,6 +89,31 @@ def _anneal_epsilon(
     return 1.0 - (1.0 - epsilon_train) * decay_frac
 
 
+def _eval_estimators(lengths_E: jax.Array, returns_E: jax.Array, budget: int) -> tuple[jax.Array, jax.Array]:
+    """Two estimators over the SAME set of completed eval episodes.
+
+    Returns ``(paper_mean, n_episodes_used)``.
+
+    The paper's Atari-100k protocol (Table 4, "Evaluation steps 125k") is Dopamine's
+    ``_run_one_phase``: play COMPLETE episodes until the cumulative agent-step count
+    reaches the budget. So episode i is played iff the steps consumed BEFORE it started
+    are below the budget, and the number of episodes is variable — long (high-scoring)
+    episodes eat the budget faster, which is why this is not the same estimator as a
+    fixed episode count. ``budget <= 0`` includes every episode, i.e. the plain mean.
+
+    If the episodes on hand never exhaust the budget, every one is included and
+    ``n_episodes_used == len(returns_E)`` — check it before trusting the paper number.
+    """
+    if budget > 0:
+        steps_before_E = jnp.cumsum(lengths_E) - lengths_E
+        included_E = steps_before_E < budget
+    else:
+        included_E = jnp.ones_like(lengths_E, dtype=bool)
+    n_used = jnp.sum(included_E)
+    paper_mean = jnp.sum(returns_E * included_E) / jnp.maximum(n_used, 1)
+    return paper_mean, n_used.astype(jnp.float32)
+
+
 def _compute_nstep_transition(
     nss: NStepState,
     obs: jax.Array,
@@ -485,7 +510,7 @@ def train_drq(
     # --- Eval callback ---
     def eval_callback(carry, q_net, rngs):
         act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=config.epsilon_eval), config, carry.obs_rms)
-        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
+        return evaluate(act_fn, rngs(), eval_env, env_params, config.eval_episodes, max_steps)
 
     # --- Outer training loop ---
     steps_per_iter = int(np.ceil(config.eval_freq / num_envs))
@@ -493,9 +518,12 @@ def train_drq(
 
     if config.run_evaluation and not config.skip_initial_evaluation:
         eval_lengths, eval_returns = eval_callback(carry, q_network, rngs)
+        paper_return, paper_n_eps = _eval_estimators(eval_lengths, eval_returns, config.eval_step_budget)
         initial_metrics = {
             "eval_lengths": eval_lengths,
             "eval_returns": eval_returns,
+            "paper_return": paper_return,
+            "paper_n_eps": paper_n_eps,
             "train_return": jnp.float32(0.0),
             "global_step": jnp.int32(0),
             **{k: jnp.float32(0.0) for k in _DRQ_METRIC_NAMES},
@@ -521,12 +549,16 @@ def train_drq(
         if config.run_evaluation:
             eval_lengths, eval_returns = eval_callback(carry, q_net, rngs)
         else:
-            eval_lengths = jnp.zeros(128)
-            eval_returns = jnp.zeros(128)
+            eval_lengths = jnp.zeros(config.eval_episodes)
+            eval_returns = jnp.zeros(config.eval_episodes)
+
+        paper_return, paper_n_eps = _eval_estimators(eval_lengths, eval_returns, config.eval_step_budget)
 
         metrics = {
             "eval_lengths": eval_lengths,
             "eval_returns": eval_returns,
+            "paper_return": paper_return,
+            "paper_n_eps": paper_n_eps,
             "train_return": train_return,
             "global_step": jnp.int32(carry.global_step),
             **avg_tm,

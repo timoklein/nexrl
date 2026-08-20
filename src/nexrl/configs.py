@@ -343,6 +343,14 @@ class DrQConfig(_BaseConfig):
     intensity_scale: float = 0.05
     terminal_on_life_loss: bool = False  # set true for Atari; create_env plumbs it
     clip_rewards: bool = True  # clip training rewards to [-1, 1]; metrics stay raw
+    # Evaluation protocol. `eval_episodes` complete episodes are always played (every
+    # slot a real episode — no zero-fill deflation). `eval_step_budget` additionally
+    # reports the PAPER's estimator: Table 4 "Evaluation steps 125k" means Dopamine's
+    # _run_one_phase, which plays complete episodes until the cumulative agent-step
+    # count reaches the budget, so the episode COUNT is variable. 0 disables it (the
+    # reported paper metric then equals the plain mean over all eval_episodes).
+    eval_episodes: int = 128
+    eval_step_budget: int = 0
     normalize_observations: bool = False
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
