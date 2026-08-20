@@ -18,6 +18,8 @@ batch_size: 32
 num_epochs: 1
 learning_rate: 1.0e-4
 adam_eps: 1.5e-4
+# Paper Table 4: "Max gradient norm 10" — a global-norm clip (see _create_networks)
+max_grad_norm: 10
 total_timesteps: 100000
 eval_freq: 10000
 gamma: 0.99

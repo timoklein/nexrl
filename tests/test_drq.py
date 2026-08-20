@@ -20,6 +20,7 @@ from .environments import (
 ARGS = {
     "learning_rate": 0.0003,
     "adam_eps": 1e-8,
+    "max_grad_norm": float("inf"),  # pinned: keep these assertions independent of the Atari default (10)
     "total_timesteps": 16384,
     "eval_freq": 16384,
     "n_step": 1,

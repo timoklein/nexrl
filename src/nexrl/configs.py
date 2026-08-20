@@ -322,7 +322,7 @@ class DrQConfig(_BaseConfig):
     num_epochs: int = 1  # update_period=1, num_updates_per_train_step=1 -> replay ratio 1
     learning_rate: float = 0.0001
     adam_eps: float = 1.5e-4  # Dopamine create_optimizer eps (NOT the optax 1e-8 default)
-    max_grad_norm: float = float("inf")  # Dopamine DrQ does not clip gradients
+    max_grad_norm: float = 10.0  # paper Table 4 "Max gradient norm 10" (global-norm clip)
     total_timesteps: int = 100_000
     eval_freq: int = 10_000
     gamma: float = 0.99

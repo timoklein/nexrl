@@ -200,8 +200,11 @@ def _create_networks(
     # Target starts as an exact copy of the online net (Dopamine syncs at construction).
     nnx.update(q_target, nnx.state(q_network, nnx.Param))
 
+    # clip_by_global_norm, not optax.clip: the paper's Table 4 specifies "Max gradient
+    # norm 10", which is a global-norm clip. optax.clip is a per-element VALUE clip and
+    # would apply a different (weaker, elementwise) constraint at the same threshold.
     tx = optax.chain(
-        optax.clip(config.max_grad_norm),
+        optax.clip_by_global_norm(config.max_grad_norm),
         optax.adam(learning_rate=config.learning_rate, eps=config.adam_eps),
     )
     q_optimizer = nnx.Optimizer(q_network, tx, wrt=nnx.Param)
