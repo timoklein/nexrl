@@ -45,6 +45,7 @@ CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/ca
 | machine (GPU) | benchmark | settings | SPS | peak VRAM | packing | date |
 |---|---|---|---|---|---|---|
 | this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | RR=1, num_envs=1, eval_freq 10k (10x128-ep evals) | 52 eff. | 8.8 GB | 3/GPU, near-linear (CPU-bound on ALE) | 2026-08-20 |
+| this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | reference net (SAME/7744), eval_freq 100k (1x400-ep final eval) | ~97 eff. (17.3 min/run) | — | 3/GPU | 2026-08-21 |
 
 Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
 the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`
@@ -59,7 +60,7 @@ When implementing or modifying algorithms, verify correctness using benchmark en
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q, SGF)
 - **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
-- **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF); BBF target 370.6 (paper, 50 seeds), DrQ threshold not yet benchmarked
+- **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
 ## Architecture
 
