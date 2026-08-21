@@ -30,6 +30,7 @@ from nexrl.algos.utils import (
     create_env,
     create_vec_env_fns,
     make_eval_act,
+    make_eval_env,
     maybe_update_targets,
     normalize_minibatch,
     normalize_obs,
@@ -228,6 +229,8 @@ def train_rainbow(
     config.validate()
     # --- Setup (traced once) ---
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     eps_schedule = linear_schedule(
         config.eps_start,
@@ -442,8 +445,8 @@ def train_rainbow(
 
     # --- Eval callback ---
     def eval_callback(carry, q_net, rngs):
-        act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=0.005), config, carry.obs_rms)
-        return evaluate(act_fn, rngs(), env, env_params, 128, max_steps)
+        act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=config.epsilon_eval), config, carry.obs_rms)
+        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
 
     # --- Outer training loop ---
     steps_per_iter = int(np.ceil(config.eval_freq / num_envs))

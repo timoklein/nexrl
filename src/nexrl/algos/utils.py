@@ -233,7 +233,17 @@ def create_env(
     has_encoder = getattr(config, "encoder_kwargs", None) is not None
     if env is None:
         if isinstance(config.env, str):
-            env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1))
+            # terminal_on_life_loss is Atari-only (BBF); pass it through only when set
+            # so non-Atari envs (which would reject the kwarg) are never handed it.
+            extra_env_kwargs = {}
+            if getattr(config, "terminal_on_life_loss", False):
+                extra_env_kwargs["terminal_on_life_loss"] = True
+            # noop_max is Atari-only (DrQ); gate on the namespace so non-Atari envs
+            # (e.g. the CartPole test configs) never see the kwarg.
+            noop_max = getattr(config, "noop_max", None)
+            if noop_max is not None and config.env.startswith("atari/"):
+                extra_env_kwargs["noop_max"] = noop_max
+            env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1), **extra_env_kwargs)
         else:
             env = config.env
             env_params = getattr(config, "env_params", None) or env.default_params  # type: ignore[union-attr]
@@ -245,6 +255,38 @@ def create_env(
     return env, env_params  # type: ignore[return-value]
 
 
+def make_eval_env(env: Any, enabled: bool = True) -> Any:
+    """Return an env that evaluation can drive without disturbing training.
+
+    Multi-instance adapters (Atari, DMC) are stateful: their JAX "state" is just an
+    int index into a Python list of live gymnasium instances, mutated in place inside
+    `pure_callback`. `evaluate` drives the env it is handed (`reset_with_id` + `step`),
+    so pointing it at the training env destroys one in-progress training episode per
+    env per eval point and leaves training to resume from a stale `last_obs`. Cloning
+    gives eval its own instances, matching the reference's separate eval envs.
+
+    Pure-JAX envs (gymnax, brax, craftax, ...) are returned unchanged: their state is a
+    real pytree carried by the caller, so `evaluate` runs independent vmapped seeds and
+    sharing the env object is harmless.
+
+    `FloatObsWrapper` needs the explicit recursion. It forwards `reset_with_id` through
+    `__getattr__`, so `evaluate` still takes the multi-lane branch through it — but
+    `getattr(wrapper, "clone")` would resolve to the *inner* env's method and hand back
+    an unwrapped env, silently dropping the float cast.
+
+    Args:
+        env: The training env, as returned by `create_env`.
+        enabled: Pass `config.run_evaluation` — when eval is off, skip building a second
+            set of emulator instances.
+    """
+    if not enabled:
+        return env
+    if isinstance(env, FloatObsWrapper):
+        return FloatObsWrapper(make_eval_env(env.env, True))
+    clone = getattr(env, "clone", None)
+    return env if clone is None else clone()
+
+
 def create_encoder(
     encoder_config: CNNConfig,
     obs_shape: tuple[int, ...],
@@ -252,6 +294,7 @@ def create_encoder(
     *,
     compute_dtype: jnp.dtype = jnp.float32,
     return_spatial: bool = False,
+    kernel_init: nnx.Initializer | None = None,
 ) -> NatureCNNEncoder | ImpalaCNNEncoder:
     """Create CNN encoder from CNNConfig.
 
@@ -263,6 +306,10 @@ def create_encoder(
             remain fp32. Defaults to fp32 to preserve behavior for non-BBF callers.
         return_spatial: If True (IMPALA only), return the (B, H', W', C) spatial
             latent instead of flat features (BBF convolutional SPR path).
+        kernel_init: Conv/Dense kernel initializer. None (default) keeps the NNX
+            default (lecun_normal) so PPO/SGF/etc. callers are unchanged; BBF passes
+            xavier_uniform to match Schwarzer's reference; DrQ passes it for the
+            nature encoder (Dopamine xavier-everywhere).
     """
     in_channels, height, width = obs_shape[0], obs_shape[1], obs_shape[2]
     if encoder_config.encoder == "nature":
@@ -275,6 +322,8 @@ def create_encoder(
             features_dim=encoder_config.features_dim,
             rngs=rngs,
             compute_dtype=compute_dtype,
+            kernel_init=kernel_init,
+            padding=encoder_config.padding,
         )
     elif encoder_config.encoder == "impala":
         return ImpalaCNNEncoder(
@@ -286,6 +335,7 @@ def create_encoder(
             width_scale=encoder_config.width_scale,
             compute_dtype=compute_dtype,
             return_spatial=return_spatial,
+            kernel_init=kernel_init,
         )
     else:
         raise ValueError(f"Unknown encoder: {encoder_config.encoder!r}. Expected 'nature' or 'impala'.")

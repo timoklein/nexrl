@@ -279,3 +279,64 @@ class ReplayBuffer(CircularBuffer):
         """
         minibatch_index = jax.random.randint(rng, (num,), 0, self.num_entries)
         return jax.tree.map(lambda arr: arr[minibatch_index], self.data)
+
+    @partial(jax.jit, static_argnames=("num", "n_step", "stride"))
+    def sample_nstep(self, num: int, rng: chex.PRNGKey, n_step: int, stride: int, gamma: float) -> Minibatch:
+        """Uniformly sample n-step transitions, computing truncated returns at SAMPLE time.
+
+        Dimension key: B = num (batch), N = n_step (window position).
+
+        Storage stays 1-step; for each sampled window start the return is
+        ``sum_{k<K} gamma^k * r_k`` over the forward window (rows ``start + k*stride``),
+        where K is the position of the first terminal in the window (its reward is
+        included) or ``n_step`` if none. This matches Dopamine's
+        ``OutOfGraphReplayBuffer``: every stored transition is a valid window start,
+        so the last n-1 transitions before each terminal are served with truncated
+        returns and ``done=True`` — an at-insert ring drops them instead.
+        ``stride`` is ``num_envs`` (``extend`` interleaves env rows, so same-env
+        consecutive timesteps are ``stride`` apart).
+
+        The returned ``done`` is True iff the window contains a terminal; the caller
+        applies the full bootstrap discount ``gamma**n_step`` gated by ``done``
+        (truncated windows never bootstrap, so no partial exponent is needed).
+        ``next_obs`` is taken at the truncation point (unused when ``done`` is True).
+
+        Window starts are drawn from the oldest entries such that the whole window
+        lies inside stored data and never crosses the write cursor.
+        """
+        span = (n_step - 1) * stride
+        num_valid = jnp.maximum(self.num_entries - span, 1)
+        oldest = jnp.where(self.full, self.index, 0)
+        offset_B = jax.random.randint(rng, (num,), 0, num_valid)
+        start_B = (oldest + offset_B) % self.size
+
+        # jnp.asarray: no-op on traced arrays, narrows chex.Array for the indexing below
+        obs_S = jnp.asarray(self.data.obs)
+        action_S = jnp.asarray(self.data.action)
+        reward_S = jnp.asarray(self.data.reward)
+        done_S = jnp.asarray(self.data.done)
+        next_obs_S = jnp.asarray(self.data.next_obs)
+
+        idx_BN = (start_B[:, None] + jnp.arange(n_step)[None, :] * stride) % self.size
+        reward_BN = reward_S[idx_BN]
+        done_BN = done_S[idx_BN]
+
+        # alive_before[k] = 1 iff no terminal at positions < k, so the reward AT the
+        # first terminal is still included (Dopamine's trajectory_length = argmax+1).
+        alive_BN = jnp.cumprod(1.0 - done_BN.astype(jnp.float32), axis=1)
+        alive_before_BN = jnp.concatenate([jnp.ones((num, 1), dtype=jnp.float32), alive_BN[:, :-1]], axis=1)
+        discount_N = gamma ** jnp.arange(n_step, dtype=jnp.float32)
+        return_B = jnp.sum(reward_BN * discount_N[None, :] * alive_before_BN, axis=1)
+
+        any_done_B = done_BN.any(axis=1)
+        # Truncation point: first terminal if any, else the window end.
+        last_B = jnp.where(any_done_B, jnp.argmax(done_BN, axis=1), n_step - 1)
+        next_idx_B = (start_B + last_B * stride) % self.size
+
+        return Minibatch(
+            obs=obs_S[start_B],
+            action=action_S[start_B],
+            reward=return_B,
+            done=any_done_B,
+            next_obs=next_obs_S[next_idx_B],
+        )

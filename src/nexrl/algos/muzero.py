@@ -36,6 +36,7 @@ from nexrl.algos.utils import (
     create_env,
     create_vec_env_fns,
     make_eval_act,
+    make_eval_env,
     normalize_obs,
     resolve_network_kwargs,
     update_rew_rms,
@@ -248,6 +249,8 @@ def train_muzero(
     """
     config.validate()
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
@@ -638,7 +641,7 @@ def train_muzero(
             config,
             carry.obs_rms,
         )
-        return evaluate(act_fn, rngs_(), env, env_params, 128, max_steps)
+        return evaluate(act_fn, rngs_(), eval_env, env_params, 128, max_steps)
 
     # --- Outer training loop ---
     steps_per_iter = int(np.ceil(config.eval_freq / num_envs))

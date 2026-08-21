@@ -1,0 +1,519 @@
+"""DrQ — Data-regularized Q, discrete Atari-100k variant — standalone training function.
+
+"Image Augmentation Is All You Need: Regularizing Deep Reinforcement Learning
+from Pixels" (Kostrikov et al., 2021)
+
+Follows the authors' official discrete-control implementation (google/dopamine
+labs/atari_100k, DrQ.gin) rather than the PyTorch continuous-control release:
+Double + Dueling DQN, n-step-10 targets, and ONE random-shift + intensity
+augmentation applied independently to the sampled obs and next_obs inside the
+train step (no K/M target averaging — that is the DMC/SAC variant). The buffer
+stores raw uint8 frames; action selection and evaluation see unaugmented frames.
+
+The buffer stores plain 1-step transitions and n-step returns are computed at
+SAMPLE time (``ReplayBuffer.sample_nstep``), matching Dopamine's buffer: every
+stored row is a valid window start, so the last n-1 transitions before each
+life/game terminal are served with truncated returns and done=True.
+
+Dimension key:
+    B: batch (num_envs during collection, batch_size during updates)
+    A: action dimension (num_actions)
+    C/H/W: image channels (stacked frames) / height / width
+"""
+
+from collections.abc import Callable
+from typing import Any, NamedTuple
+
+import chex
+import gymnax
+import jax
+import numpy as np
+import optax
+from flax import nnx
+from jax import numpy as jnp
+
+from nexrl.algos.utils import (
+    RewardRMSState,
+    RMSState,
+    create_encoder,
+    create_env,
+    create_vec_env_fns,
+    make_eval_act,
+    make_eval_env,
+    maybe_update_targets,
+    normalize_minibatch,
+    normalize_obs,
+    resolve_network_kwargs,
+    update_rew_rms,
+    update_rms,
+)
+from nexrl.buffers import Minibatch, ReplayBuffer
+from nexrl.configs import DrQConfig
+from nexrl.evaluate import evaluate
+from nexrl.networks import DiscreteQNetwork, DuelingQNetwork
+from nexrl.networks.sgf import random_intensity, random_shift
+from nexrl.types import EnvParams, GymnaxEnv, Metrics, TrainState
+
+
+_DRQ_METRIC_NAMES = ("td_loss", "mean_q_value", "epsilon")
+
+
+class DrQCarry(NamedTuple):
+    """Non-module carry state for DrQ training."""
+
+    env_state: Any
+    last_obs: chex.Array
+    last_done: chex.Array
+    global_step: int
+    replay_buffer: ReplayBuffer
+    obs_rms: RMSState
+    rew_rms: RewardRMSState
+    train_metrics: dict
+    metrics_count: int
+    running_return: chex.Array
+    completed_returns_sum: chex.Array
+    completed_returns_count: chex.Array
+
+
+def _anneal_epsilon(
+    global_step: jax.Array,
+    fill_buffer: int,
+    decay_period: int,
+    epsilon_train: float,
+) -> jax.Array:
+    """Linear epsilon decay that starts AFTER buffer fill (dopamine ``linearly_decaying_epsilon``).
+
+    Holds epsilon = 1 for the first ``min_replay_history`` (== ``fill_buffer``) env
+    steps, then decays 1 -> ``epsilon_train`` linearly over the next ``decay_period``
+    env steps (DrQ.gin: min_replay_history 1600, epsilon_decay_period 5000,
+    epsilon_train 0.1). During fill the action is uniform regardless, so the
+    meaningful effect is the annealed exploration window after training begins.
+    """
+    decay_frac = jnp.clip((global_step - fill_buffer).astype(jnp.float32) / decay_period, 0.0, 1.0)
+    return 1.0 - (1.0 - epsilon_train) * decay_frac
+
+
+def _eval_estimators(lengths_E: jax.Array, returns_E: jax.Array, budget: int) -> tuple[jax.Array, jax.Array]:
+    """Two estimators over the SAME set of completed eval episodes.
+
+    Returns ``(paper_mean, n_episodes_used)``.
+
+    The paper's Atari-100k protocol (Table 4, "Evaluation steps 125k") is Dopamine's
+    ``_run_one_phase``: play COMPLETE episodes until the cumulative agent-step count
+    reaches the budget. So episode i is played iff the steps consumed BEFORE it started
+    are below the budget, and the number of episodes is variable — long (high-scoring)
+    episodes eat the budget faster, which is why this is not the same estimator as a
+    fixed episode count. ``budget <= 0`` includes every episode, i.e. the plain mean.
+
+    If the episodes on hand never exhaust the budget, every one is included and
+    ``n_episodes_used == len(returns_E)`` — check it before trusting the paper number.
+    """
+    if budget > 0:
+        steps_before_E = jnp.cumsum(lengths_E) - lengths_E
+        included_E = steps_before_E < budget
+    else:
+        included_E = jnp.ones_like(lengths_E, dtype=bool)
+    n_used = jnp.sum(included_E)
+    paper_mean = jnp.sum(returns_E * included_E) / jnp.maximum(n_used, 1)
+    return paper_mean, n_used.astype(jnp.float32)
+
+
+def _create_networks(
+    config: DrQConfig, env: GymnaxEnv, env_params: EnvParams, rng: jax.Array
+) -> tuple[DiscreteQNetwork | DuelingQNetwork, nnx.Optimizer, DiscreteQNetwork | DuelingQNetwork]:
+    """Create Q-network, optimizer, and Q-target."""
+    agent_name = getattr(config, "agent", "DuelingQNetwork")
+    agent_cls = {"QNetwork": DiscreteQNetwork, "DuelingQNetwork": DuelingQNetwork}[agent_name]
+
+    agent_kwargs = resolve_network_kwargs(getattr(config, "agent_kwargs", None))
+
+    action_dim = env.action_space(env_params).n
+    obs_space = env.observation_space(env_params)
+    in_features = int(np.prod(obs_space.shape))
+
+    # xavier_uniform on every conv/dense matches Dopamine's FullRainbowNetwork;
+    # None keeps the NNX default (lecun_normal) so existing runs are unchanged.
+    kernel_init = nnx.initializers.xavier_uniform() if config.xavier_init else None
+    q_kwargs = {"in_features": in_features, "action_dim": action_dim, "kernel_init": kernel_init, **agent_kwargs}
+
+    rngs = nnx.Rngs(rng)
+    q_encoder = (
+        create_encoder(config.encoder_kwargs, obs_space.shape, rngs, kernel_init=kernel_init)
+        if config.encoder_kwargs
+        else None
+    )
+    qt_encoder = (
+        create_encoder(config.encoder_kwargs, obs_space.shape, rngs, kernel_init=kernel_init)
+        if config.encoder_kwargs
+        else None
+    )
+    q_network = agent_cls(**q_kwargs, encoder=q_encoder, rngs=rngs)
+    q_target = agent_cls(**q_kwargs, encoder=qt_encoder, rngs=rngs)
+    # Target starts as an exact copy of the online net (Dopamine syncs at construction).
+    nnx.update(q_target, nnx.state(q_network, nnx.Param))
+
+    # clip_by_global_norm, not optax.clip: the paper's Table 4 specifies "Max gradient
+    # norm 10", which is a global-norm clip. optax.clip is a per-element VALUE clip and
+    # would apply a different (weaker, elementwise) constraint at the same threshold.
+    tx = optax.chain(
+        optax.clip_by_global_norm(config.max_grad_norm),
+        optax.adam(learning_rate=config.learning_rate, eps=config.adam_eps),
+    )
+    q_optimizer = nnx.Optimizer(q_network, tx, wrt=nnx.Param)
+
+    return q_network, q_optimizer, q_target
+
+
+def train_drq(
+    config: DrQConfig,
+    rng: jax.Array,
+    *,
+    env: GymnaxEnv | None = None,
+    env_params: EnvParams = None,
+    log_fn: Callable[..., None] | None = None,
+) -> tuple[TrainState, Metrics]:
+    """Train a DrQ agent (discrete, Dopamine labs/atari_100k variant).
+
+    Double + Dueling DQN with n-step targets and random-shift + intensity image
+    augmentation applied to sampled minibatches.
+
+    Args:
+        config: DrQConfig with hyperparameters and environment specification.
+        rng: PRNG key for initialization and stochasticity. Use
+            ``jax.vmap`` over different keys for independent seeds.
+        env: Optional gymnax-compatible environment. Overrides ``config.env``
+            when provided.
+        env_params: Optional environment parameters. Uses defaults if ``None``.
+        log_fn: Optional callback invoked at each evaluation point via
+            ``jax.debug.callback``. Receives ``(step, metrics_dict)``.
+
+    Returns:
+        A ``(state, metrics)`` tuple where ``state`` is a dict of trained
+        parameters and ``metrics`` is a dict of JAX arrays with keys
+        including ``eval_returns``, ``eval_lengths``, and ``global_step``.
+
+    Example::
+
+        from nexrl import get_train_fn, DrQConfig
+
+        config = DrQConfig.from_yaml("configs/drq/atari/breakout.yaml")
+        keys = jax.random.split(jax.random.PRNGKey(0), 10)
+        state, metrics = jax.jit(
+            jax.vmap(get_train_fn("drq"), in_axes=(None, 0)),
+            static_argnums=(0,),
+        )(config, keys)
+    """
+    config.validate()
+    # --- Setup (traced once) ---
+    env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
+
+    num_envs = config.num_envs
+    action_space = env.action_space(env_params)
+    obs_space = env.observation_space(env_params)
+    max_steps = env_params.max_steps_in_episode
+    discrete = isinstance(action_space, gymnax.environments.spaces.Discrete)  # pyright: ignore[reportAttributeAccessIssue]
+    assert discrete, "DrQ requires discrete action space"
+
+    # n-step bootstrap discount, applied once at the window end (episode-internal
+    # truncation is handled inside ReplayBuffer.sample_nstep via the done mask;
+    # truncated windows return done=True, which zeroes the bootstrap entirely).
+    gamma_n = config.gamma**config.n_step
+
+    vmap_step, vmap_reset = create_vec_env_fns(env, config)
+
+    # Create networks and rngs
+    rngs = nnx.Rngs(rng)
+    q_network, q_optimizer, q_target = _create_networks(config, env, env_params, rngs())
+
+    # Init env
+    obs, env_state = vmap_reset(jax.random.split(rngs(), num_envs), env_params)
+
+    # Init normalization
+    obs_rms = RMSState.create(obs_space.shape)
+    rew_rms = RewardRMSState.create(num_envs)
+
+    # Init replay buffer (1-step rows; obs stay uint8 via the space's dtype)
+    buf = ReplayBuffer.empty(config.buffer_size, obs_space, action_space)
+
+    zero_train_metrics = {k: jnp.float32(0.0) for k in _DRQ_METRIC_NAMES}
+
+    carry = DrQCarry(
+        env_state=env_state,
+        last_obs=obs,
+        last_done=jnp.zeros(num_envs, dtype=bool),
+        global_step=0,
+        replay_buffer=buf,
+        obs_rms=obs_rms,
+        rew_rms=rew_rms,
+        train_metrics=zero_train_metrics,
+        metrics_count=0,
+        running_return=jnp.zeros(num_envs),
+        completed_returns_sum=jnp.float32(0.0),
+        completed_returns_count=jnp.int32(0),
+    )
+
+    # --- Collect transitions ---
+    def collect_transitions(carry, q_net, epsilon, uniform, rngs):
+        rng_action = rngs()
+
+        def sample_uniform(rng):
+            return jax.vmap(action_space.sample)(jax.random.split(rng, num_envs))
+
+        def sample_policy(rng):
+            last_obs = carry.last_obs
+            if config.normalize_observations:
+                last_obs = normalize_obs(carry.obs_rms, last_obs)
+            return q_net.act(last_obs, rng, epsilon=epsilon)
+
+        actions = jax.lax.cond(uniform, sample_uniform, sample_policy, rng_action)
+
+        rng_steps = jax.random.split(rngs(), num_envs)
+        next_obs, new_env_state, rewards, dones, info = vmap_step(rng_steps, carry.env_state, actions, env_params)
+
+        # With terminal_on_life_loss, `dones` is the true GAME boundary (game over) — a
+        # life loss is carried out-of-band in `info['life_terminal']` so it does NOT
+        # trigger an env autoreset. `real_dones` (== game over) drives the reported
+        # full-game train_return; the buffer/n-step terminal is `dones OR life_terminal`
+        # (bootstrap cut at each life). Without the wrapper both info keys are absent, so
+        # real_dones == dones and life_terminal is all-False — a no-op for other configs.
+        real_dones = info.get("real_done", dones)
+        life_terminals = info.get("life_terminal", jnp.zeros_like(dones))
+        agent_dones = jnp.logical_or(dones, life_terminals)
+
+        # Reward clipping for the TRAINING signal only (Dopamine clips the agent/buffer
+        # reward to [-1, 1]); running_return uses the RAW reward so train_return stays
+        # the true game score.
+        train_rewards = jnp.clip(rewards, -1.0, 1.0) if config.clip_rewards else rewards
+
+        # Track episode returns using raw rewards and full-game boundaries
+        new_running_B = carry.running_return + rewards
+        completed_sum = carry.completed_returns_sum + jnp.sum(new_running_B * real_dones)
+        completed_count = carry.completed_returns_count + jnp.sum(real_dones.astype(jnp.int32))
+        reset_running_B = new_running_B * (1 - real_dones)
+
+        obs_rms = carry.obs_rms
+        rew_rms = carry.rew_rms
+        if config.normalize_observations:
+            obs_rms = update_rms(obs_rms, next_obs)
+        if config.normalize_rewards:
+            rew_rms = update_rew_rms(rew_rms, rewards, dones, config.gamma)
+
+        # Store the plain 1-step transition; n-step returns are computed at SAMPLE
+        # time (ReplayBuffer.sample_nstep). This serves the last n-1 transitions
+        # before each life/game terminal with truncated returns (an at-insert ring
+        # drops them — 10x sparser terminal signal) and stores no masked filler rows.
+        transition = Minibatch(
+            obs=carry.last_obs,
+            action=actions,
+            reward=train_rewards,
+            done=agent_dones,
+            next_obs=next_obs,
+        )
+
+        carry = carry._replace(
+            last_obs=next_obs,
+            env_state=new_env_state,
+            global_step=carry.global_step + num_envs,
+            obs_rms=obs_rms,
+            rew_rms=rew_rms,
+            running_return=reset_running_B,
+            completed_returns_sum=completed_sum,
+            completed_returns_count=completed_count,
+        )
+        return carry, transition
+
+    # --- Update Q-network ---
+    def update_q(mb, q_net, q_opt, q_target, rngs):
+        obs_B = mb.obs
+        next_obs_B = mb.next_obs
+        if config.data_augmentation:
+            # Dopamine drq_image_augmentation: random shift then intensity, with
+            # INDEPENDENT keys for obs and next_obs. Offsets are drawn from
+            # [0, 2*pad) exclusive (== _per_image_random_crop). random_shift is
+            # dtype-agnostic, so the crop runs precision-free on uint8; intensity
+            # promotes uint8 * float32 -> float32, and the encoder's
+            # `.astype(compute_dtype) / 255.0` afterwards is mathematically
+            # identical to Dopamine's float-first order (scalar multiply commutes).
+            max_offset = 2 * config.shift_pad
+            rng_s1, rng_i1 = jax.random.split(rngs(), 2)
+            rng_s2, rng_i2 = jax.random.split(rngs(), 2)
+            obs_B = random_shift(rng_s1, obs_B, pad=config.shift_pad, max_offset=max_offset)
+            obs_B = random_intensity(rng_i1, obs_B, scale=config.intensity_scale)
+            next_obs_B = random_shift(rng_s2, next_obs_B, pad=config.shift_pad, max_offset=max_offset)
+            next_obs_B = random_intensity(rng_i2, next_obs_B, scale=config.intensity_scale)
+
+        # The single augmented next_obs feeds BOTH the DDQN argmax and the target
+        # evaluation, matching Dopamine's train step.
+        next_q_target_BA = q_target(next_obs_B)
+
+        def vanilla_targets():
+            return jnp.max(next_q_target_BA, axis=1)
+
+        def ddqn_targets():
+            next_q_BA = q_net(next_obs_B)
+            next_action_B1 = jnp.argmax(next_q_BA, axis=1, keepdims=True)
+            return jnp.take_along_axis(next_q_target_BA, next_action_B1, axis=1).squeeze(axis=1)
+
+        next_q_B = jax.lax.cond(config.ddqn, ddqn_targets, vanilla_targets)
+        # mb.reward is the discounted n-step sum (truncated at within-window terminals);
+        # gamma_n applies the remaining bootstrap discount at the window end.
+        target_B = mb.reward + jnp.logical_not(mb.done) * gamma_n * next_q_B
+
+        def loss_fn(model):
+            q_B = model.take(obs_B, mb.action)
+            # Huber, not MSE: full_rainbow's non-distributional loss defaults to
+            # losses.huber_loss (DrQ.gin does not set mse_loss).
+            return optax.huber_loss(q_B, target_B, delta=1.0).mean(), q_B.mean()
+
+        (loss, mean_q), grads = nnx.value_and_grad(loss_fn, has_aux=True)(q_net)
+        q_opt.update(q_net, grads)
+        return loss, mean_q
+
+    # --- Train iteration ---
+    def train_iteration(carry, q_network, q_optimizer, q_target, rngs):
+        start_training = carry.global_step > config.fill_buffer
+        old_global_step = carry.global_step
+
+        epsilon = _anneal_epsilon(carry.global_step, config.fill_buffer, config.epsilon_decay_period, config.epsilon_train)
+        uniform = jnp.logical_not(start_training)
+        carry, batch = collect_transitions(carry, q_network, epsilon, uniform, rngs)
+        carry = carry._replace(replay_buffer=carry.replay_buffer.extend(batch))
+
+        zero_update_metrics = {"td_loss": jnp.float32(0.0), "mean_q_value": jnp.float32(0.0)}
+
+        def update_iteration(_, state):
+            carry, q_net, q_opt, q_tgt, rngs, metrics_sum = state
+            minibatch = carry.replay_buffer.sample_nstep(
+                config.batch_size, rngs(), n_step=config.n_step, stride=config.num_envs, gamma=config.gamma
+            )
+            minibatch = normalize_minibatch(minibatch, config, carry.obs_rms, carry.rew_rms)
+            td_loss, mean_q = update_q(minibatch, q_net, q_opt, q_tgt, rngs)
+            metrics_sum = jax.tree.map(lambda s, m: s + m, metrics_sum, {"td_loss": td_loss, "mean_q_value": mean_q})
+            return (carry, q_net, q_opt, q_tgt, rngs, metrics_sum)
+
+        def do_updates(carry, q_net, q_opt, q_tgt, rngs):
+            carry, q_net, q_opt, q_tgt, rngs, metrics_sum = nnx.fori_loop(
+                0, config.num_epochs, update_iteration, (carry, q_net, q_opt, q_tgt, rngs, zero_update_metrics)
+            )
+            iter_metrics = jax.tree.map(lambda s: s / config.num_epochs, metrics_sum)
+            return carry, q_net, q_opt, q_tgt, rngs, iter_metrics
+
+        def no_updates(carry, q_net, q_opt, q_tgt, rngs):
+            return carry, q_net, q_opt, q_tgt, rngs, zero_update_metrics
+
+        carry, q_network, q_optimizer, q_target, rngs, update_metrics = nnx.cond(
+            start_training, do_updates, no_updates, carry, q_network, q_optimizer, q_target, rngs
+        )
+
+        # Update target network. target_update_freq=1 + polyak=0.0 == hard copy every
+        # env step (Dopamine target_update_period=1 at replay ratio 1, synced after the
+        # gradient step). See DrQConfig for why polyak must stay 0.0.
+        q_target = maybe_update_targets(
+            q_network, q_target, config.polyak, config.target_update_freq, old_global_step, carry.global_step
+        )
+
+        # Accumulate metrics (only when training)
+        iter_metrics = {**update_metrics, "epsilon": epsilon}
+        carry = carry._replace(
+            train_metrics=jax.tree.map(lambda s, m: jnp.where(start_training, s + m, s), carry.train_metrics, iter_metrics),
+            metrics_count=jnp.where(start_training, carry.metrics_count + 1, carry.metrics_count),
+        )
+
+        return carry, q_network, q_optimizer, q_target, rngs
+
+    # --- Eval callback ---
+    def eval_callback(carry, q_net, rngs):
+        act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=config.epsilon_eval), config, carry.obs_rms)
+        return evaluate(act_fn, rngs(), eval_env, env_params, config.eval_episodes, max_steps)
+
+    # --- Outer training loop ---
+    steps_per_iter = int(np.ceil(config.eval_freq / num_envs))
+    num_evals = int(np.ceil(config.total_timesteps / config.eval_freq))
+
+    if config.run_evaluation and not config.skip_initial_evaluation:
+        eval_lengths, eval_returns = eval_callback(carry, q_network, rngs)
+        paper_return, paper_n_eps = _eval_estimators(eval_lengths, eval_returns, config.eval_step_budget)
+        initial_metrics = {
+            "eval_lengths": eval_lengths,
+            "eval_returns": eval_returns,
+            "paper_return": paper_return,
+            "paper_n_eps": paper_n_eps,
+            "train_return": jnp.float32(0.0),
+            "global_step": jnp.int32(0),
+            **{k: jnp.float32(0.0) for k in _DRQ_METRIC_NAMES},
+        }
+        if log_fn is not None:
+            jax.debug.callback(log_fn, initial_metrics)
+
+    def eval_iteration(state, _):
+        carry, q_net, q_opt, q_tgt, rngs = state
+
+        def train_body(_, s):
+            return train_iteration(*s)
+
+        carry, q_net, q_opt, q_tgt, rngs = nnx.fori_loop(0, steps_per_iter, train_body, (carry, q_net, q_opt, q_tgt, rngs))
+
+        # Average training metrics
+        count = jnp.maximum(carry.metrics_count, 1)
+        avg_tm = jax.tree.map(lambda s: s / count, carry.train_metrics)
+
+        # Mean training episode return
+        train_return = carry.completed_returns_sum / jnp.maximum(carry.completed_returns_count, 1)
+
+        if config.run_evaluation:
+            eval_lengths, eval_returns = eval_callback(carry, q_net, rngs)
+        else:
+            eval_lengths = jnp.zeros(config.eval_episodes)
+            eval_returns = jnp.zeros(config.eval_episodes)
+
+        paper_return, paper_n_eps = _eval_estimators(eval_lengths, eval_returns, config.eval_step_budget)
+
+        metrics = {
+            "eval_lengths": eval_lengths,
+            "eval_returns": eval_returns,
+            "paper_return": paper_return,
+            "paper_n_eps": paper_n_eps,
+            "train_return": train_return,
+            "global_step": jnp.int32(carry.global_step),
+            **avg_tm,
+        }
+
+        if log_fn is not None:
+            jax.debug.callback(log_fn, metrics)
+
+        # Reset accumulator (use traced ops to preserve nnx.scan carry references)
+        carry = carry._replace(
+            train_metrics=jax.tree.map(lambda x: x * 0, carry.train_metrics),
+            metrics_count=carry.metrics_count * 0,
+            completed_returns_sum=carry.completed_returns_sum * 0,
+            completed_returns_count=carry.completed_returns_count * 0,
+        )
+
+        return (carry, q_net, q_opt, q_tgt, rngs), metrics
+
+    @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))
+    def scan_eval(state, _dummy):
+        return eval_iteration(state, _dummy)
+
+    (carry, q_network, q_optimizer, q_target, rngs), all_metrics = scan_eval(
+        (carry, q_network, q_optimizer, q_target, rngs), jnp.zeros(num_evals)
+    )
+
+    if config.run_evaluation and not config.skip_initial_evaluation:
+        all_metrics = jax.tree.map(
+            lambda i, ev: jnp.concatenate((jnp.expand_dims(i, 0), ev)),
+            initial_metrics,
+            all_metrics,
+        )
+
+    state = {
+        "q_network": q_network,
+        "q_optimizer": q_optimizer,
+        "q_target": q_target,
+        "obs_rms_state": carry.obs_rms,
+        "rew_rms_state": carry.rew_rms,
+        "global_step": carry.global_step,
+    }
+    return state, all_metrics

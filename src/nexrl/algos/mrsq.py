@@ -40,6 +40,7 @@ from nexrl.algos.utils import (
     create_env,
     create_vec_env_fns,
     make_eval_act,
+    make_eval_env,
     normalize_obs,
     update_rew_rms,
     update_rms,
@@ -228,6 +229,8 @@ def train_mrsq(
     """
     config.validate()
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
@@ -882,7 +885,7 @@ def train_mrsq(
             return action_BA * max_action
 
         act = make_eval_act(act_fn, config, carry.obs_rms)
-        return evaluate(act, rngs_(), env, env_params, 128, max_steps)
+        return evaluate(act, rngs_(), eval_env, env_params, 128, max_steps)
 
     # --- Outer training loop ---
     steps_per_iter = num_envs

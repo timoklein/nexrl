@@ -7,9 +7,15 @@ Structure matches Schwarzer's reference SPRNetwork / RainbowDQNNetwork:
 
 - The IMPALA encoder outputs a *spatial* latent ``(B, H', W', C)`` (no internal
   projection). ``renormalize`` (per-sample min-max to [0, 1]) is applied to it.
-- A single network-level projection (``Dense`` + ReLU) maps the flattened
-  spatial latent to ``features_dim``. This projection is SHARED between the
-  Q-head input and the SPR target/online representation.
+- A single network-level projection (``Dense``, NO activation) maps the
+  flattened spatial latent to ``features_dim``. This raw projection is SHARED
+  between the Q-head input and the SPR target/online representation. The ReLU
+  is applied ONLY on the Q-head path (reference ``__call__`` does
+  ``x = project(...); x = relu(x); head(x)`` — spr_networks.py:850-851), while
+  the SPR target (``encode_project``) and SPR predictor input (``spr_predict``)
+  consume the RAW projection (spr_networks.py:799-811). Baking ReLU into the
+  shared projection would run the SPR cosine loss on non-negative vectors — a
+  different auxiliary objective than the reference's.
 - Dueling C51 head reads the projected features.
 - SPR transition model is CONVOLUTIONAL (``ConvTMCell``): the action one-hot is
   broadcast across the spatial grid and concatenated on the channel axis, then
@@ -33,6 +39,8 @@ Dimension key:
     F: features_dim (projection output = SPR projection dim)
     J: jumps (SPR prediction horizon)
 """
+
+from typing import Any
 
 import distrax
 import jax
@@ -83,10 +91,12 @@ def _gather_action_atoms(x_BAN: jax.Array, action_B: jax.Array) -> jax.Array:
 class BBFNetwork(nnx.Module):
     """BBF agent network: scaled IMPALA encoder + dueling C51 + convolutional SPR.
 
-    The network-level projection (``Dense`` + ReLU on the flattened, renormalized
-    spatial latent) is shared between the Q-head input and the SPR
-    representation, matching Schwarzer's reference where the ``FeatureLayer``
-    projection feeds both the Q-head and the SPR projection/target.
+    The network-level projection (``Dense`` on the flattened, renormalized
+    spatial latent — NO activation) is shared between the Q-head input and the
+    SPR representation, matching Schwarzer's reference where the ``FeatureLayer``
+    projection feeds both the Q-head and the SPR projection/target. The ReLU is
+    applied only on the Q-head path (see ``encode`` / the loss_fn Q-head site),
+    not inside ``project`` — so the SPR target/predictor see the raw projection.
     """
 
     def __init__(
@@ -101,6 +111,7 @@ class BBFNetwork(nnx.Module):
         in_features: int = 0,
         *,
         compute_dtype: jnp.dtype = jnp.float32,
+        kernel_init: nnx.Initializer | None = None,
     ):
         self.action_dim = action_dim
         self.n_atoms = n_atoms
@@ -110,7 +121,13 @@ class BBFNetwork(nnx.Module):
         self._compute_dtype = compute_dtype
 
         # Linear/Conv compute in compute_dtype; params (master weights) stay fp32.
-        lin_kwargs = {"dtype": compute_dtype, "param_dtype": jnp.float32}
+        # kernel_init=None -> NNX default (lecun_normal); BBF passes xavier_uniform
+        # to match Schwarzer's reference (every conv/dense is xavier_uniform). This
+        # init also flows to the S&P reset's fresh draws (make_fresh_params builds a
+        # BBFNetwork with the same kwargs), so resets re-draw from the matched init.
+        lin_kwargs: dict[str, Any] = {"dtype": compute_dtype, "param_dtype": jnp.float32}
+        if kernel_init is not None:
+            lin_kwargs["kernel_init"] = kernel_init
 
         # --- Encoder (spatial) + shared projection ---
         if encoder is not None:
@@ -149,18 +166,26 @@ class BBFNetwork(nnx.Module):
         return renormalize(self.encoder(obs_BCHW))
 
     def project(self, spatial_BHWC: jax.Array) -> jax.Array:
-        """Shared projection: flatten spatial latent -> Dense -> ReLU. (B, Hs, Ws, Cs) -> (B, F)."""
+        """Shared RAW projection: flatten spatial latent -> Dense (no activation). (B, Hs, Ws, Cs) -> (B, F).
+
+        Reference ``project`` (spr_networks.py:804-806) applies no activation; the
+        ReLU lives only on the Q-head path (``encode`` / loss_fn). SPR target
+        (``encode_project``) and predictor input (``spr_predict``) consume this raw
+        projection, so the SPR cosine loss runs on the same space as the reference.
+        """
         flat_BS = spatial_BHWC.reshape(spatial_BHWC.shape[0], -1)
-        return nnx.relu(self.projection(flat_BS))
+        return self.projection(flat_BS)
 
     def encode(self, obs: jax.Array) -> jax.Array:
-        """Encode observations to projected feature vectors. (B, C, H, W) or (B, D) -> (B, F).
+        """Encode observations to Q-head feature vectors. (B, C, H, W) or (B, D) -> (B, F).
 
         CNN path: encoder spatial latent -> renormalize -> flatten -> projection -> ReLU.
-        The projection IS the BBF "FeatureLayer", shared with the SPR target.
+        The ReLU is applied HERE (Q-head path), not inside ``project`` — matching the
+        reference ``__call__`` (``project`` then ``relu`` before the head). The raw
+        ``project`` output feeds the SPR target/predictor instead (see ``project``).
         """
         if self._has_encoder:
-            return self.project(self.encode_spatial(obs))
+            return nnx.relu(self.project(self.encode_spatial(obs)))
         return nnx.relu(self.flat_embed(obs.reshape(obs.shape[0], -1).astype(jnp.float32)))
 
     def q_logits(self, features_BF: jax.Array) -> jax.Array:
@@ -247,8 +272,9 @@ def spr_rollout(network: BBFNetwork, spatial_BHWC: jax.Array, actions_JB: jax.Ar
 def spr_targets(target_network: BBFNetwork, future_obs_JBCHW: jax.Array) -> jax.Array:
     """Compute SPR targets from target network (stop_gradient).
 
-    Reference-aligned: SPR target is the projection of the renormalized spatial
-    latent (the shared FeatureLayer projection), matching the online side.
+    Reference-aligned: SPR target is the RAW projection of the renormalized
+    spatial latent (``encode_project``, no ReLU — spr_networks.py:799-802),
+    matching the online predictor's raw-projection input (``spr_predict``).
 
     Args:
         target_network: Target BBFNetwork (read-only).

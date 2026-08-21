@@ -25,6 +25,7 @@ uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml --learning-
 uv run python train.py ppo --env Pendulum-v1 --agent-kwargs.activation tanh
 uv run python train.py sac_simba --config configs/sac_simba/gymnax/pendulum.yaml
 uv run python train.py dqn --config configs/dqn/atari/breakout.yaml
+uv run python train.py drq --config configs/drq/atari/breakout.yaml
 uv run python train.py ppo --config configs/ppo/atari/breakout.yaml
 uv run python train.py ppo_rnn --config configs/ppo_rnn/gymnax/cartpole.yaml
 uv run python train.py sac --config configs/sac/dm_control/cheetah_run.yaml
@@ -39,6 +40,19 @@ uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml --track --w
 CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml
 ```
 
+## Throughput ledger
+
+| machine (GPU) | benchmark | settings | SPS | peak VRAM | packing | date |
+|---|---|---|---|---|---|---|
+| this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | RR=1, num_envs=1, eval_freq 10k (10x128-ep evals) | 52 eff. | 8.8 GB | 3/GPU, near-linear (CPU-bound on ALE) | 2026-08-20 |
+| this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | reference net (SAME/7744), eval_freq 100k (1x400-ep final eval) | ~97 eff. (17.3 min/run) | — | 3/GPU | 2026-08-21 |
+
+Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
+the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`
+shows JAX's preallocated ~30 GB, not the 8.8 GB working set — measure with
+`XLA_PYTHON_CLIENT_PREALLOCATE=false`. Atari runs must be one seed per process: the multi-instance
+adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
+
 ## Algorithm Verification
 
 When implementing or modifying algorithms, verify correctness using benchmark environments:
@@ -46,6 +60,7 @@ When implementing or modifying algorithms, verify correctness using benchmark en
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q, SGF)
 - **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
+- **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
 ## Architecture
 
@@ -163,6 +178,16 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **Hidden state reset**: Done at timestep t means obs at t is from new episode — reset BEFORE GRU step: `hstate = hstate * (1 - done[:, None])`.
 - **Minibatch shuffling**: Shuffles along env axis (axis=1) preserving temporal structure, unlike standard PPO's flatten-and-shuffle.
 - **Sequence recomputation**: Must use `nnx.scan` (not `jax.lax.scan`) because model is the gradient target. Model and hstate packed as single carry tuple.
+
+### DrQ (discrete, Atari-100k)
+
+- **Reference is Dopamine labs/atari_100k DrQ.gin**, not the PyTorch SAC release: Double + Dueling DQN, n-step 10, ONE shift+intensity augmentation each for obs/next_obs (no K/M target averaging — that's the DMC variant). Loss is **Huber**, not MSE.
+- **Augmentation dtype order**: `random_shift` on uint8 (precision-free crop), `random_intensity` promotes to float32, encoder's `/255` after — commutes with Dopamine's float-first order. `max_offset=2*shift_pad` (full-range offsets, exclusive) matches `_per_image_random_crop`.
+- **`polyak=0.0` + `target_update_freq=1` encodes a HARD target copy every env step** (Dopamine `target_update_period=1` at RR=1) via `maybe_update_targets`'s freq==1 polyak branch. Tuning polyak away from 0.0 silently breaks fidelity.
+- **Sample-time n-step** (`ReplayBuffer.sample_nstep`): buffer stores 1-step rows; truncated n-step returns are built when a batch is sampled, matching Dopamine. This serves the last n−1 pre-terminal transitions with done=True targets and stores no masked filler rows — the at-insert ring (still used by DrQ-v2/Rainbow) drops those windows, giving 10× sparser terminal signal.
+- Epsilon anneal starts AFTER buffer fill (`_anneal_epsilon`), not from step 0.
+- **Reference network layout**: conv (padding **SAME** — Flax `nn.Conv` default in Dopamine's `FullRainbowNetwork`, flatten 11×11×64=7744) → Dense(512) → ReLU → dueling heads, 4.05M params. The single 512 hidden layer is the ENCODER's dense, so the yaml sets `agent_kwargs.hidden_layer_sizes: []` and `encoder_kwargs.padding: SAME`. Adding `[512]` back creates a second hidden layer the reference doesn't have; `padding: VALID` (Nature-DQN canon, other algos' default) shrinks the trunk to 3136/1.95M.
+- `noop_max` (train+eval no-op starts) defaults to gymnasium's 30; the Dopamine reference applies NONE — `--noop-max 0` is reference-faithful (A/B pending).
 
 ### DrQ-v2
 

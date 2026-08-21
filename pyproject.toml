@@ -141,6 +141,7 @@ max-complexity = 15
 "__init__.py" = ["F401"]
 "tests/**/*.py" = ["N802", "N803", "N806"]
 "src/nexrl/networks/*.py" = ["N803", "N806"]
+"src/nexrl/buffers.py" = ["N806"]
 "src/nexrl/algos/*.py" = ["N803", "N806", "C901", "SIM108"]
 
 [tool.ruff.lint.isort]

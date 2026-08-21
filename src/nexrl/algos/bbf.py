@@ -44,7 +44,7 @@ from nexrl.algos.utils import (
     create_encoder,
     create_env,
     create_vec_env_fns,
-    make_eval_act,
+    make_eval_env,
 )
 from nexrl.buffers import BBFReplayBuffer, Minibatch
 from nexrl.configs import BBFConfig
@@ -101,11 +101,45 @@ def _anneal_gamma(
     min_gamma: float,
     cycle_steps: int,
 ) -> jax.Array:
-    """Exponential increase from min_gamma to max_gamma over cycle_steps."""
+    """Exponential increase from min_gamma to max_gamma over cycle_steps.
+
+    Interpolates in **log(1 - gamma)** space (the effective-horizon space), matching
+    Schwarzer's ``exponential_decay_scheduler(cycle_steps, 0, min_gamma, gamma,
+    reverse=True)`` for the gamma schedule (spr_agent.py:311-352, 1259-1261).
+    ``reverse=True`` makes 1.0 the asymptote, so the log-interpolated quantity is
+    ``1 - gamma`` rather than ``gamma``. At the cycle midpoint this gives
+    ``gamma = 1 - sqrt((1-min_gamma)(1-max_gamma)) ≈ 0.9905`` (effective horizon ~105),
+    versus ~0.9834 (horizon ~60) if ``log(gamma)`` were interpolated directly.
+    Endpoints are identical either way; the path through every anneal phase differs,
+    and BBF anneals 25% of all training (10k of each 40k-grad-step cycle).
+    """
     frac = jnp.minimum(cycle_grad_steps.astype(jnp.float32) / cycle_steps, 1.0)
-    log_max = jnp.log(jnp.float32(max_gamma))
-    log_min = jnp.log(jnp.float32(min_gamma))
-    return jnp.exp(log_min + (log_max - log_min) * frac)
+    log_one_minus_min = jnp.log(jnp.float32(1.0 - min_gamma))
+    log_one_minus_max = jnp.log(jnp.float32(1.0 - max_gamma))
+    one_minus_gamma = jnp.exp(log_one_minus_min + (log_one_minus_max - log_one_minus_min) * frac)
+    return 1.0 - one_minus_gamma
+
+
+def _anneal_epsilon(
+    global_step: jax.Array,
+    fill_buffer: int,
+    decay_period: int,
+    epsilon_train: float,
+) -> jax.Array:
+    """Linear epsilon decay that starts AFTER buffer fill (dopamine ``linearly_decaying_epsilon``).
+
+    Reference holds epsilon = 1 for the first ``min_replay_history`` (== ``fill_buffer``)
+    env steps — the warmup window — then decays 1 -> ``epsilon_train`` linearly over the
+    next ``decay_period`` env steps (BBF.gin: warmup 2000, decay_period 2001,
+    epsilon_train 0; ``dqn_agent.linearly_decaying_epsilon``). During fill the action is
+    uniform regardless (the ``jax.lax.cond`` in ``jit_collect``), so warming epsilon = 1
+    there is a no-op; the meaningful effect is ~``decay_period`` env steps of annealed
+    exploration with the trained (target) policy after training begins. Our old schedule
+    decayed from step 0, so epsilon reached ``epsilon_train`` the moment updates began —
+    losing that post-fill exploration window.
+    """
+    decay_frac = jnp.clip((global_step - fill_buffer).astype(jnp.float32) / decay_period, 0.0, 1.0)
+    return 1.0 - (1.0 - epsilon_train) * decay_frac
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +255,13 @@ def _create_networks(
 
     compute_dtype = jnp.bfloat16 if config.compute_dtype == "bfloat16" else jnp.float32
 
+    # Finding #7: xavier_uniform init (reference) vs NNX default lecun_normal (ours).
+    # None -> NNX default (also keeps PPO/SGF encoder callers unchanged). Threaded into
+    # both the encoder factory and every BBFNetwork construction below — including the
+    # S&P reset's fresh draws (make_fresh_params shares net_kwargs/_make_encoder), so
+    # resets re-draw from the matched init distribution.
+    kernel_init = nnx.initializers.xavier_uniform() if config.xavier_init else None
+
     if config.encoder_kwargs is not None:
         features_dim = config.encoder_kwargs.features_dim
         in_features = 0
@@ -242,6 +283,7 @@ def _create_networks(
             encoder_rngs,
             compute_dtype=compute_dtype,
             return_spatial=True,
+            kernel_init=kernel_init,
         )
 
     encoder = _make_encoder(rngs)
@@ -254,6 +296,7 @@ def _create_networks(
         "v_max": config.v_max,
         "features_dim": features_dim,
         "in_features": in_features,
+        "kernel_init": kernel_init,
     }
 
     network = BBFNetwork(**net_kwargs, encoder=encoder, rngs=rngs, compute_dtype=compute_dtype)
@@ -336,6 +379,13 @@ def train_bbf(
     config.validate()
     env, env_params = create_env(config, env, env_params)
 
+    # Fix B (audit): evaluate on a DEDICATED set of env instances, never the live
+    # training instances. Pointing eval at the training env destroys each in-progress
+    # training episode, writes one physically-inconsistent max-priority transition per
+    # env per eval, and splices the running_return windows. Matches the reference's
+    # separate eval envs (eval_run_experiment.py:523-525).
+    eval_env = make_eval_env(env, config.run_evaluation)
+
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
     obs_space = env.observation_space(env_params)
@@ -375,11 +425,7 @@ def train_bbf(
     def jit_collect(carry, q_net, target_net, rngs):
         rng_action = rngs()
 
-        epsilon = jnp.where(
-            carry.global_step < config.epsilon_decay_period,
-            config.epsilon_train + (1.0 - config.epsilon_train) * (1.0 - carry.global_step / config.epsilon_decay_period),
-            config.epsilon_train,
-        )
+        epsilon = _anneal_epsilon(carry.global_step, config.fill_buffer, config.epsilon_decay_period, config.epsilon_train)
 
         def sample_uniform(rng):
             return jax.vmap(action_space.sample)(jax.random.split(rng, num_envs))
@@ -392,7 +438,18 @@ def train_bbf(
         actions = jax.lax.cond(uniform, sample_uniform, sample_policy, rng_action)
 
         rng_steps = jax.random.split(rngs(), num_envs)
-        next_obs, new_env_state, rewards, dones, _ = vmap_step(rng_steps, carry.env_state, actions, env_params)
+        next_obs, new_env_state, rewards, dones, info = vmap_step(rng_steps, carry.env_state, actions, env_params)
+
+        # With terminal_on_life_loss, `dones` is the true GAME boundary (game over) — a
+        # life loss is carried out-of-band in `info['life_terminal']` so it does NOT
+        # trigger an env autoreset (reference: a life loss continues the same game with
+        # the agent's real next action). `real_dones` (== game over) drives the reported
+        # full-game train_return; the buffer/n-step terminal is `dones OR life_terminal`
+        # (bootstrap cut at each life). Without the wrapper both info keys are absent, so
+        # real_dones == dones and life_terminal is all-False — a no-op for other configs.
+        real_dones = info.get("real_done", dones)
+        life_terminals = info.get("life_terminal", jnp.zeros_like(dones))
+        agent_dones = jnp.logical_or(dones, life_terminals)
 
         # Reward clipping for the TRAINING signal only (matches Schwarzer's runner,
         # which clips the agent/buffer reward to [-1, 1]). running_return below uses
@@ -402,15 +459,15 @@ def train_bbf(
         train_rewards = jnp.clip(rewards, -1.0, 1.0) if config.clip_rewards else rewards
 
         new_running_B = carry.running_return + rewards  # RAW reward for the reported metric
-        completed_sum = carry.completed_returns_sum + jnp.sum(new_running_B * dones)
-        completed_count = carry.completed_returns_count + jnp.sum(dones.astype(jnp.int32))
-        reset_running_B = new_running_B * (1 - dones)
+        completed_sum = carry.completed_returns_sum + jnp.sum(new_running_B * real_dones)
+        completed_count = carry.completed_returns_count + jnp.sum(real_dones.astype(jnp.int32))
+        reset_running_B = new_running_B * (1 - real_dones)
 
         mb = Minibatch(
             obs=carry.last_obs,
             action=actions,
             reward=train_rewards,
-            done=dones,
+            done=agent_dones,
             next_obs=next_obs,
         )
         priorities_B = jnp.full(num_envs, carry.max_priority**config.per_alpha)
@@ -440,6 +497,11 @@ def train_bbf(
         current_n = _anneal_n_step(carry.cycle_grad_steps, config.max_n_step, config.n_step, config.cycle_steps)
         current_gamma = _anneal_gamma(carry.cycle_grad_steps, config.gamma, config.min_gamma, config.cycle_steps)
 
+        # Reference random-shift range: Schwarzer's drq_image_aug crops with offset
+        # in [0, 2*pad) (both directions); our shared random_shift defaults to the
+        # one-sided [0, pad] range, so pass max_offset explicitly when full_range_shift.
+        shift_max_offset = 2 * config.shift_pad if config.full_range_shift else None
+
         # random_shift is dtype-agnostic (pad + dynamic_slice). Augment in uint8
         # so the spatial crop is precision-free, then apply intensity aug
         # (matches Schwarzer's drq_image_aug: per-image multiplicative noise on
@@ -447,7 +509,7 @@ def train_bbf(
         # encoder's `.astype(compute_dtype) / 255.0` then makes it [0, ~1.1].
         current_obs_BCHW = subseq_mb.obs[:, 0]  # (B, C, H, W) uint8
         if config.data_augmentation:
-            current_obs_BCHW = random_shift(rngs(), current_obs_BCHW, pad=config.shift_pad)
+            current_obs_BCHW = random_shift(rngs(), current_obs_BCHW, pad=config.shift_pad, max_offset=shift_max_offset)
             current_obs_BCHW = random_intensity(rngs(), current_obs_BCHW)
 
         n_step_return_B, bootstrap_discount_B, effective_next_obs_B = _compute_nstep_from_subsequence(
@@ -460,14 +522,18 @@ def train_bbf(
 
         next_obs_aug_BCHW = effective_next_obs_B
         if config.data_augmentation:
-            next_obs_aug_BCHW = random_shift(rngs(), next_obs_aug_BCHW, pad=config.shift_pad)
+            next_obs_aug_BCHW = random_shift(rngs(), next_obs_aug_BCHW, pad=config.shift_pad, max_offset=shift_max_offset)
             next_obs_aug_BCHW = random_intensity(rngs(), next_obs_aug_BCHW)
 
         # C51 target (DDQN: online selects action, target provides distribution)
         next_features_BF = q_tgt.encode(next_obs_aug_BCHW)
         online_next_features_BF = q_net.encode(next_obs_aug_BCHW)
 
-        online_next_q_BA = jnp.sum(jax.nn.softmax(q_net.q_logits(online_next_features_BF), axis=-1) * support_N, axis=-1)
+        # Finding E: cast logits to fp32 before softmax, matching the CE-training site
+        # (~line 588) and the fp32 C51 target. bf16 softmax flips argmax between near-tied
+        # actions in this DDQN action selection, biasing the projected target distribution.
+        online_next_logits_BAN = q_net.q_logits(online_next_features_BF).astype(jnp.float32)
+        online_next_q_BA = jnp.sum(jax.nn.softmax(online_next_logits_BAN, axis=-1) * support_N, axis=-1)
         next_action_B = jnp.argmax(online_next_q_BA, axis=1)
 
         target_probs_BN = q_tgt.take_probs(next_features_BF, next_action_B)
@@ -478,9 +544,20 @@ def train_bbf(
         )
         projected_BN = jax.lax.stop_gradient(projected_BN)
 
-        # SPR targets from target encoder
+        # SPR targets from target encoder. The reference augments the entire
+        # subsequence (spr_agent.py:587) and slices the augmented future frames
+        # for the SPR target (spr_agent.py:725), so every future frame gets the
+        # same per-image random-shift + intensity as the current/next obs. We
+        # flatten (J, B) into one batch axis and augment per-image to match.
         future_obs_JB = subseq_mb.obs[:, 1 : config.jumps + 1]  # (B, J, C, H, W)
         future_obs_JBCHW = jnp.transpose(future_obs_JB, (1, 0, *range(2, future_obs_JB.ndim)))  # (J, B, C, H, W)
+        if config.data_augmentation and config.augment_spr_targets:
+            J, B = future_obs_JBCHW.shape[:2]
+            chw = future_obs_JBCHW.shape[2:]  # (C, H, W)
+            future_flat = future_obs_JBCHW.reshape(J * B, *chw)  # (J*B, C, H, W)
+            future_flat = random_shift(rngs(), future_flat, pad=config.shift_pad, max_offset=shift_max_offset)
+            future_flat = random_intensity(rngs(), future_flat)
+            future_obs_JBCHW = future_flat.reshape(J, B, *chw)
         spr_tgt_JBP = spr_targets(q_tgt, future_obs_JBCHW)
 
         spr_actions_BJ = subseq_mb.action[:, : config.jumps]  # (B, J)
@@ -492,8 +569,10 @@ def train_bbf(
         def loss_fn(model):
             # Encode to the spatial latent once: project it for the Q-head, and
             # roll the convolutional SPR transition forward from the same latent.
+            # ReLU is on the Q-head path only (reference __call__: project then
+            # relu before head); SPR rollout/targets use the RAW projection.
             spatial_BHWC = model.encode_spatial(current_obs_BCHW)
-            features_BF = model.project(spatial_BHWC)
+            features_BF = nnx.relu(model.project(spatial_BHWC))
 
             # Compute q_logits once and derive both log_probs (for CE) and
             # mean_q metric from it. XLA likely CSEs this anyway but explicit
@@ -521,9 +600,25 @@ def train_bbf(
         (loss, (ce_B, spr_loss_B, mean_q)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(q_net)
         q_opt.update(q_net, grads)
 
+        # Per-sample priority value from the C51 cross-entropy (the metric uses its mean in
+        # both regimes; the sharp regime also writes it back to the buffer).
         new_priorities_B = ce_B + config.per_eps
-        new_buf = carry.replay_buffer.update_priorities(indices, new_priorities_B**config.per_alpha)
-        new_max_priority = jnp.maximum(carry.max_priority, new_priorities_B.max())
+
+        # PER priority update. Sharp (ours, default): set every sampled transition's
+        # priority to its own (ce+eps)^alpha -> sampling concentrates on high-TD samples.
+        # Non-sharp (reference-effective near-uniform + recency): skip the per-sample
+        # updates so priorities stay frozen at their max-priority insert value, but keep
+        # max_priority tracking the running BATCH-MEAN loss (the reference's set_priority
+        # writes sqrt(batch-mean DQNLoss)) so new inserts sit at the running max -> weak
+        # recency. Sampling stays ~uniform and the IS weights_B applied in loss_fn fall out
+        # ~1, matching Schwarzer's effective behavior (the 357 agent). `config.sharp_per`
+        # is a static Python bool, so this branch is resolved at trace time (no nnx.cond).
+        if config.sharp_per:
+            new_buf = carry.replay_buffer.update_priorities(indices, new_priorities_B**config.per_alpha)
+            new_max_priority = jnp.maximum(carry.max_priority, new_priorities_B.max())
+        else:
+            new_buf = carry.replay_buffer  # freeze per-sample priorities (no sharp PER update)
+            new_max_priority = jnp.maximum(carry.max_priority, new_priorities_B.mean())
 
         _polyak_update(q_net, q_tgt, 1.0 - config.target_update_tau)
 
@@ -631,9 +726,35 @@ def train_bbf(
     # -----------------------------------------------------------------------
     # Eval helper
     # -----------------------------------------------------------------------
+    # Reference acts with the EMA target net for BOTH collection and eval when
+    # target_action_selection=True (spr_agent.py:1882-1884: select_params = target if
+    # target_action_selection else online — independent of eval_mode). Our collection
+    # already does this (jit_collect: select_net = target_net if target_action_selection);
+    # evaluate the same net so eval matches the acting policy. The EMA-smoothed target
+    # should also reduce our single-eval-point variance. `target` is mutated in place by
+    # the Polyak update, so this reference stays the live target across the loop.
+    eval_net = target if config.target_action_selection else network
+
+    # Compile-once eval: pass the net PARAMS as a traced arg (`agent_state`) rather than
+    # closing over the live module. A closure bakes the params in as compile-time constants,
+    # so `evaluate` (whose `act` is a static jit arg) fully RECOMPILES and reallocates a
+    # fresh executable on every eval; those accumulate and OOM at eval time under memory
+    # pressure (co-tenant GPUs). Splitting the structure once gives `eval_act` a stable
+    # identity → a single compilation reused across evals; each eval merges the current
+    # params, supplied as a runtime input. Semantics are unchanged (identical computation),
+    # so eval numbers stay comparable. BBF has normalize_observations=False, so there is no
+    # obs_rms path (unlike make_eval_act).
+    eval_graphdef, _ = nnx.split(eval_net)
+
+    def eval_act(agent_state, obs, rng):
+        net = nnx.merge(eval_graphdef, agent_state)
+        obs = jnp.expand_dims(obs, 0)  # single-env obs -> batch of 1 (make_eval_act parity)
+        action = net.act(obs, rng, epsilon=config.epsilon_eval)
+        return jnp.squeeze(action)
+
     def run_eval(q_net, rngs):
-        act_fn = make_eval_act(lambda obs, rng: q_net.act(obs, rng, epsilon=config.epsilon_eval), config, None)
-        return evaluate(act_fn, rngs(), env, env_params, 128, max_steps)
+        _, state = nnx.split(q_net)
+        return evaluate(eval_act, rngs(), eval_env, env_params, 128, max_steps, agent_state=state)
 
     # -----------------------------------------------------------------------
     # Python outer loop
@@ -659,7 +780,7 @@ def train_bbf(
 
     # Optional initial evaluation
     if config.run_evaluation and not config.skip_initial_evaluation:
-        eval_lengths, eval_returns = run_eval(network, rngs)
+        eval_lengths, eval_returns = run_eval(eval_net, rngs)
         initial_metrics = {
             "eval_lengths": eval_lengths,
             "eval_returns": eval_returns,
@@ -682,25 +803,21 @@ def train_bbf(
             metrics_accum = jax.tree.map(lambda a, m: a + m, metrics_accum, update_metrics)
             metrics_count = metrics_count + 1
 
-            # --- Periodic shrink-and-perturb reset (env-step semantics) ---
-            if config.reset_every > 0 and env_steps_collected >= next_reset_at and next_reset_at <= config.no_resets_after:
-                # Draw the random component of S&P outside JIT — eager construction
-                # of a fresh BBFNetwork lets us re-use the network's real init path
-                # (kernel inits, biases) rather than a fan-in heuristic. Independent
-                # `rngs()` advances for online and target yield independent draws.
-                fresh = make_fresh_params(rngs())
-                fresh_target = make_fresh_params(rngs())
-                carry = jit_reset(network, optimizer, target, carry, fresh, fresh_target)
-                next_reset_at += config.reset_every
-
-        # --- Periodic evaluation ---
+        # --- Periodic evaluation (runs BEFORE the S&P reset below) ---
+        # reset_every (5k) and eval_freq (10k) share the 10k grid, so every SECOND reset
+        # lands on an eval point (10/20/.../90k); the in-between resets (5/15/.../95k) fall
+        # between evals. The eval `if` block precedes the reset `if` block in this loop body,
+        # so at every coinciding point the eval reads the trained end-of-cycle policy BEFORE
+        # the reset perturbs it (a post-reset eval reads the random Q-head ⇒ ≈0 return — the
+        # cosmetic dip that made those eval points illegible). The reset still fires this
+        # iteration, just after the eval has read the pre-reset weights.
         if (step + 1) % eval_period == 0:
             # `final_eval_only` runs the costly 128-episode Atari eval just once, at the
             # last eval point; the train_return curve is still logged every eval_period.
             is_final_eval = (step + 1) == total_env_steps
             do_eval = config.run_evaluation and (not config.final_eval_only or is_final_eval)
             if do_eval:
-                eval_lengths, eval_returns = run_eval(network, rngs)
+                eval_lengths, eval_returns = run_eval(eval_net, rngs)
             else:
                 eval_lengths = jnp.zeros(128, dtype=jnp.float32)
                 eval_returns = jnp.zeros(128, dtype=jnp.float32)
@@ -730,6 +847,28 @@ def train_bbf(
                 completed_returns_sum=jnp.float32(0.0),
                 completed_returns_count=jnp.int32(0),
             )
+
+        # --- Periodic shrink-and-perturb reset (env-step semantics) — AFTER eval ---
+        # Guarded by `step >= fill_steps` so no reset fires before training starts. Strict
+        # `<` on no_resets_after: with no_resets_after == total_timesteps the final iteration
+        # hits env_steps == total exactly, so `<=` would fire a pointless reset on the last
+        # step. `<` keeps resets at 5/10/.../95k and excludes the 100k terminal. (Reference
+        # additionally skips a reset lacking a full interval to recover before no_resets_after,
+        # so its last reset is ~90k vs our 95k — one extra late reset; deferred 🟡 minor.)
+        if (
+            step >= fill_steps
+            and config.reset_every > 0
+            and env_steps_collected >= next_reset_at
+            and next_reset_at < config.no_resets_after
+        ):
+            # Draw the random component of S&P outside JIT — eager construction of a fresh
+            # BBFNetwork re-uses the network's real init path (kernel inits, biases) rather
+            # than a fan-in heuristic. Independent `rngs()` advances for online and target
+            # yield independent draws.
+            fresh = make_fresh_params(rngs())
+            fresh_target = make_fresh_params(rngs())
+            carry = jit_reset(network, optimizer, target, carry, fresh, fresh_target)
+            next_reset_at += config.reset_every
 
     # Pad if fewer evals than expected
     while len(all_metrics_list) < num_evals:

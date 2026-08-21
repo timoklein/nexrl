@@ -25,6 +25,11 @@ class CNNConfig:
     encoder: str = "nature"  # "nature" or "impala"
     features_dim: int = 512  # 512 for nature, 256 for impala
     width_scale: int = 1  # channel multiplier for IMPALA encoder
+    # Conv padding (nature encoder only; IMPALA is SAME by design). "VALID" is the
+    # Nature-DQN convention (84x84 -> 7x7x64 = 3136 flat). "SAME" matches Dopamine's
+    # FullRainbowNetwork, whose nn.Conv calls take the Flax default (84x84 -> 11x11x64
+    # = 7744 flat) — the network that produced the published DrQ Atari-100k numbers.
+    padding: str = "VALID"
 
 
 def _dict_to_dataclass(cls: type, d: dict[str, Any]) -> Any:
@@ -293,7 +298,73 @@ class DQNConfig(_BaseConfig):
     eps_start: float = 1.0  # initial epsilon for epsilon-greedy
     eps_end: float = 0.01  # final epsilon
     exploration_fraction: float = 0.5  # fraction of training for epsilon decay
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     ddqn: bool = True  # use Double DQN for target computation
+    normalize_observations: bool = False
+    normalize_rewards: bool = False
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class DrQConfig(_BaseConfig):
+    """DrQ (Kostrikov et al. 2021), discrete Atari-100k variant.
+
+    Reference: google/dopamine labs/atari_100k DrQ.gin — Double + Dueling DQN,
+    n-step 10, one random-shift + intensity augmentation per sampled obs/next_obs.
+    """
+
+    env: str = "atari/Breakout-v5"
+    agent: str = "DuelingQNetwork"  # DrQ.gin: dueling = True
+    agent_kwargs: NetworkConfig = dataclasses.field(default_factory=NetworkConfig)
+    num_envs: int = 1  # Dopamine runs a single env
+    # 110000 holds all 100k transitions of an Atari-100k run without wrapping — identical
+    # training to the gin's 1M capacity, without the OOM (see configs/bbf/atari/breakout.yaml).
+    buffer_size: int = 110_000
+    fill_buffer: int = 1_600  # min_replay_history
+    batch_size: int = 32
+    num_epochs: int = 1  # update_period=1, num_updates_per_train_step=1 -> replay ratio 1
+    learning_rate: float = 0.0001
+    adam_eps: float = 1.5e-4  # Dopamine create_optimizer eps (NOT the optax 1e-8 default)
+    max_grad_norm: float = 10.0  # paper Table 4 "Max gradient norm 10" (global-norm clip)
+    total_timesteps: int = 100_000
+    eval_freq: int = 10_000
+    gamma: float = 0.99
+    n_step: int = 10  # update_horizon
+    # target_update_freq=1 takes the polyak branch of maybe_update_targets; polyak=0.0
+    # degenerates it to a HARD copy every env step == Dopamine target_update_period=1
+    # at replay ratio 1. Tuning polyak away from 0.0 silently breaks reference fidelity.
+    polyak: float = 0.0
+    target_update_freq: int = 1
+    epsilon_train: float = 0.1
+    epsilon_eval: float = 0.05
+    epsilon_decay_period: int = 5_000  # env steps of linear decay AFTER buffer fill
+    ddqn: bool = True  # DrQ.gin: double_dqn = True
+    # False: NNX default init (lecun_normal everywhere). True: xavier_uniform for EVERY
+    # conv/dense (encoder + MLP + dueling heads) — the reference default: Dopamine's
+    # FullRainbowNetwork uses nn.initializers.xavier_uniform() on every layer.
+    xavier_init: bool = False
+    # The ONE DrQ augmentation: random shift (edge-pad shift_pad, per-image offset in
+    # [0, 2*shift_pad) — Dopamine _per_image_random_crop) then per-image intensity noise.
+    data_augmentation: bool = True
+    shift_pad: int = 4
+    intensity_scale: float = 0.05
+    terminal_on_life_loss: bool = False  # set true for Atari; create_env plumbs it
+    # Random no-op starts per reset (gymnasium AtariPreprocessing noop_max; train AND
+    # eval). 30 is the gymnasium default and what all runs so far used. The Dopamine
+    # reference applies NO no-ops anywhere — its env is fully deterministic — so 0 is
+    # the reference-faithful value (A/B pending).
+    noop_max: int = 30
+    clip_rewards: bool = True  # clip training rewards to [-1, 1]; metrics stay raw
+    # Evaluation protocol. `eval_episodes` complete episodes are always played (every
+    # slot a real episode — no zero-fill deflation). `eval_step_budget` additionally
+    # reports the PAPER's estimator: Table 4 "Evaluation steps 125k" means Dopamine's
+    # _run_one_phase, which plays complete episodes until the cumulative agent-step
+    # count reaches the budget, so the episode COUNT is variable. 0 disables it (the
+    # reported paper metric then equals the plain mean over all eval_episodes).
+    eval_episodes: int = 128
+    eval_step_budget: int = 0
     normalize_observations: bool = False
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
@@ -322,6 +393,8 @@ class IQNConfig(_BaseConfig):
     eps_start: float = 1.0
     eps_end: float = 0.01
     exploration_fraction: float = 0.5
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     normalize_observations: bool = False
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
@@ -346,6 +419,8 @@ class PQNConfig(_BaseConfig):
     eps_start: float = 1.0
     eps_end: float = 0.05
     exploration_fraction: float = 0.1
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     normalize_observations: bool = False
     normalize_rewards: bool = False
     skip_initial_evaluation: bool = False
@@ -373,6 +448,8 @@ class RainbowConfig(_BaseConfig):
     eps_start: float = 1.0
     eps_end: float = 0.01
     exploration_fraction: float = 0.5
+    # Epsilon used by the eval policy. 0.001 is the Dopamine/DER canonical value (matches BBFConfig).
+    epsilon_eval: float = 0.001
     # C51
     n_atoms: int = 51
     v_min: float = -10.0
@@ -450,6 +527,23 @@ class BBFConfig(_BaseConfig):
     # Augmentation
     data_augmentation: bool = True
     shift_pad: int = 4
+    # Random-shift offset range. Schwarzer's BBF crops with offset in [0, 2*pad)
+    # (drq_image_aug -> _per_image_random_crop, randint(0, padded - cropped = 2*pad);
+    # spr_networks.py:106-118), giving shifts in BOTH directions. Our shared
+    # `random_shift` defaults to a one-sided [0, pad] range (SGF/DrQ-v2). True ->
+    # pass the reference [0, 2*pad) range at BBF's augmentation call sites; False ->
+    # the legacy one-sided range (ablation control). Only active when data_augmentation.
+    full_range_shift: bool = True
+    # Augment the SPR target's future frames (random-shift + intensity), exactly
+    # like the current/next obs. Schwarzer's BBF augments the WHOLE subsequence
+    # (spr_agent.py:587) then slices the augmented future frames for the SPR
+    # target (spr_agent.py:725), so the target sees augmented views. Set False to
+    # feed raw future frames (ablation control). Only active when data_augmentation.
+    augment_spr_targets: bool = True
+    # Terminal-on-life-loss (Atari): the agent sees a per-life terminal (n-step cut at
+    # life boundaries) while the game continues across lives and train_return/eval stay
+    # full-game. Matches Schwarzer's BBF runner. Off by default for non-Breakout configs.
+    terminal_on_life_loss: bool = False
     # Reward clipping to [-1, 1] for the TRAINING signal (buffer/targets), matching
     # Schwarzer's runner. train_return is reported on the RAW reward (the reference
     # reports unclipped cum_reward), so the metric stays the true game score.
@@ -458,6 +552,18 @@ class BBFConfig(_BaseConfig):
     per_alpha: float = 0.5
     per_beta: float = 0.5
     per_eps: float = 1e-6
+    # Sharp per-sample PER (ours) vs the reference's EFFECTIVE near-uniform sampling.
+    # True (default): every sampled transition's priority is updated to its own
+    # (ce+eps)^alpha each step -> sampling concentrates on high-TD transitions, IS
+    # weights vary strongly. False: replicate Schwarzer's *effective* behavior — his
+    # set_priority zip-bug (spr_agent.py:1646-1649 zips (B*G,) indices with (G,)
+    # batch-MEAN priorities) updates only ~2 of 64 sampled transitions per step, so
+    # ~62/64 stay frozen at their max-priority insert value (subsequence_replay_buffer.py
+    # _add: Schaul max-for-new). Net: ≈ uniform sampling + weak recency (new data at the
+    # running max), IS weights ≈ 1. We skip the per-sample priority updates (freeze at
+    # insert) but keep max_priority tracking the running-mean loss so new inserts sit at
+    # the highest priority. Not the literal zip bug — its effect. The 357 agent ran False.
+    sharp_per: bool = True
     # Standard
     normalize_observations: bool = False
     normalize_rewards: bool = False
@@ -469,6 +575,13 @@ class BBFConfig(_BaseConfig):
     # Eval consumes RNG only at the final point, so training dynamics are identical to
     # a run with run_evaluation=False up to the last step.
     final_eval_only: bool = False
+    # Initialization scheme. False (default): Flax NNX defaults (lecun_normal kernels
+    # everywhere). True: xavier_uniform for EVERY conv/dense (encoder, transition convs,
+    # projection, predictor, value/advantage heads) — matching Schwarzer's reference
+    # (spr_networks.py initializer_type='xavier_uniform'). lecun/xavier std ratio is
+    # ~2.9x (first conv) to ~0.75x (projection/heads); the init also re-seeds every S&P
+    # reset (~18x/run), so it compounds. Audit finding #7.
+    xavier_init: bool = False
     # CNN encoder
     encoder_kwargs: CNNConfig | None = dataclasses.field(
         default_factory=lambda: CNNConfig(encoder="impala", features_dim=2048, width_scale=4)
@@ -906,6 +1019,7 @@ ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "alphazero": AlphaZeroConfig,
     "bbf": BBFConfig,
     "dreamer": DreamerConfig,
+    "drq": DrQConfig,
     "drqv2": DrQV2Config,
     "mrq": MrQConfig,
     "mrsq": MrsQConfig,

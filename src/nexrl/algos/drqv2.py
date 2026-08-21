@@ -30,6 +30,7 @@ from nexrl.algos.utils import (
     RewardRMSState,
     RMSState,
     _polyak_update,
+    make_eval_env,
 )
 from nexrl.buffers import Minibatch, NStepState, ReplayBuffer, create_nstep_state
 from nexrl.compat import create
@@ -250,6 +251,12 @@ def train_drqv2(
         action_repeat=config.action_repeat,
         frame_stack=config.frame_stack,
     )
+    # Dedicated eval instances — DrQ-v2 always runs on DMC, whose multi-instance adapter is
+    # stateful, so sharing would destroy in-progress training episodes at every eval point.
+    # Keep passing the *training* `env_params`: create_dmc returns action-repeat-adjusted
+    # params that the env object itself does not carry (its `_max_steps` stays None), so
+    # re-deriving them from the clone would silently drop the action-repeat cap.
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     num_envs = config.num_envs
     action_space = env.action_space(env_params)
@@ -479,7 +486,7 @@ def train_drqv2(
             features = encoder(obs)
             return jnp.squeeze(actor(features))
 
-        return evaluate(act_fn, rngs(), env, env_params, NUM_EVAL_SEEDS, max_steps)
+        return evaluate(act_fn, rngs(), eval_env, env_params, NUM_EVAL_SEEDS, max_steps)
 
     # --- Outer training loop ---
     num_train_its_per_eval = config.eval_freq

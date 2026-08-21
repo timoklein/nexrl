@@ -30,6 +30,7 @@ from nexrl.algos.utils import (
     create_env,
     create_vec_env_fns,
     make_eval_act,
+    make_eval_env,
     resolve_network_kwargs,
     shuffle_and_split,
     update_and_normalize_obs,
@@ -145,6 +146,8 @@ def train_pqn(
     config.validate()
     # --- Setup ---
     env, env_params = create_env(config, env, env_params)
+    # Dedicated eval instances — sharing stateful Atari/DMC envs corrupts training (see make_eval_env).
+    eval_env = make_eval_env(env, config.run_evaluation)
 
     eps_schedule = linear_schedule(
         config.eps_start,
@@ -321,8 +324,8 @@ def train_pqn(
 
     # --- Eval callback ---
     def eval_callback(carry, q_network, rngs):
-        act_fn = make_eval_act(lambda obs, rng: q_network.act(obs, rng, epsilon=0.005), config, carry.obs_rms)
-        return evaluate(act_fn, rngs(), env, env_params, 128, max_steps)
+        act_fn = make_eval_act(lambda obs, rng: q_network.act(obs, rng, epsilon=config.epsilon_eval), config, carry.obs_rms)
+        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
 
     # --- Outer training loop ---
     iteration_steps = num_envs * num_steps

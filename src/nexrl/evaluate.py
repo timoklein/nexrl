@@ -17,15 +17,19 @@ class EvalState(NamedTuple):
 
 
 def evaluate_single(
-    act: ActFn,
+    act: Any,  # (obs, rng) -> action, or (agent_state, obs, rng) -> action when agent_state is passed
     env: GymnaxEnv,
     env_params: EnvParams,
     rng: jax.Array,
     max_steps_in_episode: int,
+    agent_state: Any = None,
 ) -> tuple[jax.Array, jax.Array]:
     def step(state):
         rng, rng_act, rng_step = jax.random.split(state.rng, 3)
-        action = act(state.last_obs, rng_act)
+        # `agent_state is None` is a trace-time branch: the default keeps act's (obs, rng)
+        # signature; the traced-params path uses (agent_state, obs, rng) so params flow as a
+        # runtime input rather than being baked in as compile-time constants.
+        action = act(state.last_obs, rng_act) if agent_state is None else act(agent_state, state.last_obs, rng_act)
         obs, env_state, reward, done, _ = env.step(rng_step, state.env_state, action, env_params)
         state = EvalState(
             rng=rng,
@@ -61,13 +65,14 @@ class _MultiLaneState(NamedTuple):
 
 
 def _evaluate_multi_lane(
-    act: ActFn,
+    act: Any,  # (obs, rng) -> action, or (agent_state, obs, rng) -> action when agent_state is passed
     env: GymnaxEnv,
     env_params: EnvParams,
     rng: jax.Array,
     env_idx: jax.Array,
     n_episodes: int,
     max_steps_in_episode: int,
+    agent_state: Any = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Play ``n_episodes`` sequential episodes on the single gymnasium instance
     bound to ``env_idx`` and return their per-episode (lengths, returns).
@@ -77,19 +82,23 @@ def _evaluate_multi_lane(
     in a single vmap — extra lanes would alias an instance, the exact bug fixed
     here. Instead, vmap binds each lane to its own instance via ``reset_with_id``
     (``env_ids = arange(num_envs)``, mirroring ``create_vec_env_fns``), and each
-    lane plays its episodes back-to-back: when an episode ends, the gymnasium
-    ``Autoreset`` wrapper starts a fresh one on the next step (that reset step
-    yields ``reward=0, done=False``, so it does not corrupt the next return; it
-    only inflates the recorded length by 1).
+    lane plays its episodes back-to-back: the Atari adapter auto-resets in-step, so
+    the game-over step returns the fresh-episode reset obs as ``next_obs`` with
+    ``done/real_done=True`` — the loop records that episode's return on the
+    ``real_done`` boundary and the next step simply starts from the reset obs (no
+    phantom reset step, no length inflation).
 
     This is a single data-dependent ``while_loop`` chain per lane, so the
     side-effecting ``pure_callback`` steps are strictly ordered — no cross-round
     reordering hazard — making it safe both inside a jit'd training scan and in a
     Python outer loop.
     """
-    # Generous halting guarantee: each episode is truncated by the env's TimeLimit
-    # at <= max_steps_in_episode, so ep_idx reaches n_episodes well within this.
-    max_total_steps = n_episodes * max_steps_in_episode
+    # Play a FIXED n_episodes to completion so every slot in `returns`/`lengths`
+    # holds a real episode — no zero-filled slots to deflate the mean (the core of
+    # audit finding A). Each episode is force-terminated at `max_steps_in_episode`
+    # (see `step`), so a lane completes n_episodes within this loose backstop; it is
+    # defence-in-depth, not the binding guard (that is `ep_idx < n_episodes`).
+    max_total_steps = n_episodes * (max_steps_in_episode + 1)
 
     rng_reset, rng_eval = jax.random.split(rng)
     obs, env_state = env.reset_with_id(rng_reset, env_idx, env_params)
@@ -110,19 +119,32 @@ def _evaluate_multi_lane(
 
     def step(s: _MultiLaneState) -> _MultiLaneState:
         rng, rng_act, rng_step = jax.random.split(s.rng, 3)
-        action = act(s.last_obs, rng_act)
-        obs, env_state, reward, done, _ = env.step(rng_step, s.env_state, action, env_params)
+        action = act(s.last_obs, rng_act) if agent_state is None else act(agent_state, s.last_obs, rng_act)
+        obs, env_state, reward, done, info = env.step(rng_step, s.env_state, action, env_params)
 
         cur_return = s.cur_return + reward.squeeze()
         cur_length = s.cur_length + 1
 
+        # Segment on the true GAME boundary, not the agent terminal. With
+        # terminal_on_life_loss the env emits `done` per life but `info['real_done']`
+        # only on game over; eval must report full-game returns (comparable to the
+        # paper). Without the wrapper real_done == done, so this is unchanged.
+        game_over = info.get("real_done", done)
+        # Per-episode truncation cap (audit finding A): guarantees every episode
+        # ends, so all n_episodes complete and the mean has no empty slots even for
+        # a strong policy that plays very long games. Mirrors the reference's 27000
+        # agent-step cap (BBF.gin:69). At Atari-100k it effectively never fires
+        # (Breakout games end far sooner); the rare "capped but not game_over" case
+        # (env not autoreset, next episode continues the same game) is an unhit corner.
+        boundary = jnp.logical_or(game_over, cur_length >= max_steps_in_episode)
+
         # On episode end, record this episode into slot ep_idx (guaranteed < n_episodes
         # by `cond`), then zero the accumulators and advance the episode counter.
-        returns = jnp.where(done, s.returns.at[s.ep_idx].set(cur_return), s.returns)
-        lengths = jnp.where(done, s.lengths.at[s.ep_idx].set(cur_length.astype(jnp.float32)), s.lengths)
-        ep_idx = s.ep_idx + done.astype(jnp.int32)
-        cur_return = jnp.where(done, jnp.float32(0.0), cur_return)
-        cur_length = jnp.where(done, jnp.int32(0), cur_length)
+        returns = jnp.where(boundary, s.returns.at[s.ep_idx].set(cur_return), s.returns)
+        lengths = jnp.where(boundary, s.lengths.at[s.ep_idx].set(cur_length.astype(jnp.float32)), s.lengths)
+        ep_idx = s.ep_idx + boundary.astype(jnp.int32)
+        cur_return = jnp.where(boundary, jnp.float32(0.0), cur_return)
+        cur_length = jnp.where(boundary, jnp.int32(0), cur_length)
 
         return _MultiLaneState(
             rng=rng,
@@ -148,6 +170,7 @@ def evaluate(
     env_params: EnvParams,
     num_seeds: int = 128,
     max_steps_in_episode: int | None = None,
+    agent_state: Any = None,
 ) -> EvalMetrics:
     """Evaluate a policy given by `act` on `num_seeds` environments.
 
@@ -173,8 +196,8 @@ def evaluate(
     # `evaluate_single` over `num_seeds` seeds. Unchanged from the original path.
     if getattr(env, "reset_with_id", None) is None:
         seeds = jax.random.split(rng, num_seeds)
-        vmap_collect = jax.vmap(evaluate_single, in_axes=(None, None, None, 0, None))
-        return vmap_collect(act, env, env_params, seeds, max_steps_in_episode)
+        vmap_collect = jax.vmap(evaluate_single, in_axes=(None, None, None, 0, None, None))
+        return vmap_collect(act, env, env_params, seeds, max_steps_in_episode, agent_state)
 
     # Multi-instance envs (Atari/DMC) expose only `num_envs` physical gymnasium
     # instances behind a `pure_callback`. The base `env.reset` hardcodes instance 0,
@@ -187,8 +210,8 @@ def evaluate(
     n_episodes = -(-num_seeds // n_inst)  # ceil division
     env_ids = jnp.arange(n_inst, dtype=jnp.int32)
     seeds = jax.random.split(rng, n_inst)
-    vmap_collect = jax.vmap(_evaluate_multi_lane, in_axes=(None, None, None, 0, 0, None, None))
+    vmap_collect = jax.vmap(_evaluate_multi_lane, in_axes=(None, None, None, 0, 0, None, None, None))
     # Both arrays are (n_inst, n_episodes).
-    lengths, returns = vmap_collect(act, env, env_params, seeds, env_ids, n_episodes, max_steps_in_episode)
+    lengths, returns = vmap_collect(act, env, env_params, seeds, env_ids, n_episodes, max_steps_in_episode, agent_state)
     # (n_inst, n_episodes) -> (n_inst * n_episodes,), trimmed to the requested count.
     return lengths.reshape(-1)[:num_seeds], returns.reshape(-1)[:num_seeds]
