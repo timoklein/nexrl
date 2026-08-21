@@ -518,7 +518,7 @@ class EpisodicLifeEnv(gym.Wrapper):
         return obs, info
 
 
-def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = False, **kwargs):
+def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = False, noop_max: int = 30, **kwargs):
     """Create Atari environment with standard preprocessing.
 
     Observation: (4, 84, 84) uint8 (grayscale, frame-stacked).
@@ -528,6 +528,8 @@ def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = F
             (via ``EpisodicLifeEnv``) while the game continues across lives and the
             full-game return is preserved through ``info['real_done']``. Matches
             Schwarzer's BBF runner; off by default to keep other Atari configs intact.
+        noop_max: random no-op starts per reset (gymnasium AtariPreprocessing default
+            30). Dopamine's DrQ path applies none — pass 0 for reference fidelity.
     """
     import ale_py  # noqa: F401
 
@@ -540,7 +542,9 @@ def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = F
 
     def make_fn():
         env = gym.make(f"ALE/{env_name}", frameskip=1, **kwargs)
-        env = gym.wrappers.AtariPreprocessing(env, frame_skip=frame_skip, grayscale_obs=True, scale_obs=False)
+        env = gym.wrappers.AtariPreprocessing(
+            env, noop_max=noop_max, frame_skip=frame_skip, grayscale_obs=True, scale_obs=False
+        )
         env = gym.wrappers.FrameStackObservation(env, 4)
         if terminal_on_life_loss:
             env = EpisodicLifeEnv(env)  # above FrameStack (see EpisodicLifeEnv docstring)

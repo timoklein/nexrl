@@ -25,6 +25,11 @@ def _conv_output_size(h: int, kernel: int, stride: int, padding: int = 0) -> int
     return (h - kernel + 2 * padding) // stride + 1
 
 
+def _conv_output_size_same(h: int, stride: int) -> int:
+    """Compute output spatial dim for SAME convolution (kernel-independent)."""
+    return (h + stride - 1) // stride
+
+
 class NatureCNNEncoder(nnx.Module):
     """Nature DQN convolutional encoder.
 
@@ -45,18 +50,23 @@ class NatureCNNEncoder(nnx.Module):
         *,
         compute_dtype: jnp.dtype = jnp.float32,
         kernel_init: nnx.Initializer | None = None,
+        padding: str = "VALID",
     ):
         self._features_dim = features_dim
         self._compute_dtype = compute_dtype
         # kernel_init=None -> NNX default (lecun_normal), preserving behavior for
         # existing callers; DrQ/Dopamine-reference callers pass xavier_uniform.
         init_kwargs: dict[str, Any] = {} if kernel_init is None else {"kernel_init": kernel_init}
+        # padding="VALID" is the Nature-DQN convention (7x7x64 at 84x84); "SAME"
+        # matches Dopamine's FullRainbowNetwork (Flax nn.Conv default; 11x11x64).
+        if padding not in ("VALID", "SAME"):
+            raise ValueError(f"padding must be 'VALID' or 'SAME', got {padding!r}")
         self.conv1 = nnx.Conv(
             in_features=in_channels,
             out_features=32,
             kernel_size=(8, 8),
             strides=(4, 4),
-            padding="VALID",
+            padding=padding,
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
@@ -67,7 +77,7 @@ class NatureCNNEncoder(nnx.Module):
             out_features=64,
             kernel_size=(4, 4),
             strides=(2, 2),
-            padding="VALID",
+            padding=padding,
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
@@ -78,16 +88,20 @@ class NatureCNNEncoder(nnx.Module):
             out_features=64,
             kernel_size=(3, 3),
             strides=(1, 1),
-            padding="VALID",
+            padding=padding,
             dtype=compute_dtype,
             param_dtype=jnp.float32,
             rngs=rngs,
             **init_kwargs,
         )
 
-        # Compute flattened size after convolutions (VALID padding is nnx.Conv default)
-        h = _conv_output_size(_conv_output_size(_conv_output_size(height, 8, 4), 4, 2), 3, 1)
-        w = _conv_output_size(_conv_output_size(_conv_output_size(width, 8, 4), 4, 2), 3, 1)
+        # Compute flattened size after convolutions
+        if padding == "SAME":
+            h = _conv_output_size_same(_conv_output_size_same(_conv_output_size_same(height, 4), 2), 1)
+            w = _conv_output_size_same(_conv_output_size_same(_conv_output_size_same(width, 4), 2), 1)
+        else:
+            h = _conv_output_size(_conv_output_size(_conv_output_size(height, 8, 4), 4, 2), 3, 1)
+            w = _conv_output_size(_conv_output_size(_conv_output_size(width, 8, 4), 4, 2), 3, 1)
         flat_size = h * w * 64
 
         self.dense = nnx.Linear(

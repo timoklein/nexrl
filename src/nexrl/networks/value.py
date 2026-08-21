@@ -123,8 +123,12 @@ class DuelingQNetwork(nnx.Module):
         # match Dopamine's FullRainbowNetwork (xavier on every conv/dense).
         init_kwargs = {} if kernel_init is None else {"kernel_init": kernel_init}
         self.mlp = MLP(effective_in, hidden_layer_sizes, activation, rngs, kernel_init=kernel_init)
-        self.value_head = nnx.Linear(hidden_layer_sizes[-1], 1, rngs=rngs, **init_kwargs)
-        self.advantage_head = nnx.Linear(hidden_layer_sizes[-1], action_dim, rngs=rngs, **init_kwargs)
+        # Empty hidden_layer_sizes: heads sit directly on the (encoder) features — the
+        # Dopamine FullRainbowNetwork layout, whose single 512 hidden layer is the
+        # encoder's own dense (conv -> flatten -> Dense(512) -> ReLU -> {V, A}).
+        head_in = hidden_layer_sizes[-1] if len(hidden_layer_sizes) > 0 else effective_in
+        self.value_head = nnx.Linear(head_in, 1, rngs=rngs, **init_kwargs)
+        self.advantage_head = nnx.Linear(head_in, action_dim, rngs=rngs, **init_kwargs)
 
     def __call__(self, obs: jax.Array) -> jax.Array:
         x = self.encoder(obs) if self.encoder else obs

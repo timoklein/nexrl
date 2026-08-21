@@ -185,6 +185,8 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **`polyak=0.0` + `target_update_freq=1` encodes a HARD target copy every env step** (Dopamine `target_update_period=1` at RR=1) via `maybe_update_targets`'s freq==1 polyak branch. Tuning polyak away from 0.0 silently breaks fidelity.
 - **Sample-time n-step** (`ReplayBuffer.sample_nstep`): buffer stores 1-step rows; truncated n-step returns are built when a batch is sampled, matching Dopamine. This serves the last n−1 pre-terminal transitions with done=True targets and stores no masked filler rows — the at-insert ring (still used by DrQ-v2/Rainbow) drops those windows, giving 10× sparser terminal signal.
 - Epsilon anneal starts AFTER buffer fill (`_anneal_epsilon`), not from step 0.
+- **Reference network layout**: conv (padding **SAME** — Flax `nn.Conv` default in Dopamine's `FullRainbowNetwork`, flatten 11×11×64=7744) → Dense(512) → ReLU → dueling heads, 4.05M params. The single 512 hidden layer is the ENCODER's dense, so the yaml sets `agent_kwargs.hidden_layer_sizes: []` and `encoder_kwargs.padding: SAME`. Adding `[512]` back creates a second hidden layer the reference doesn't have; `padding: VALID` (Nature-DQN canon, other algos' default) shrinks the trunk to 3136/1.95M.
+- `noop_max` (train+eval no-op starts) defaults to gymnasium's 30; the Dopamine reference applies NONE — `--noop-max 0` is reference-faithful (A/B pending).
 
 ### DrQ-v2
 

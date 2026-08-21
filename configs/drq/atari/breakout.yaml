@@ -1,12 +1,19 @@
 # DrQ Atari-100k (google/dopamine labs/atari_100k DrQ.gin)
 env: atari/Breakout-v5
 agent: DuelingQNetwork
+# Reference network layout (Dopamine FullRainbowNetwork): conv -> flatten(7744) ->
+# Dense(512) -> ReLU -> {V, A} heads. The single 512 hidden layer is the ENCODER's
+# dense, so agent_kwargs.hidden_layer_sizes must stay [] — adding a layer here gives
+# a second hidden layer the reference doesn't have (paper Table 4: "hidden units 512",
+# singular). padding SAME matches the reference convs (Flax nn.Conv default there);
+# VALID (Nature-DQN canon) would shrink the trunk to 3136 flat / 1.95M vs 4.05M params.
 agent_kwargs:
   activation: relu
-  hidden_layer_sizes: [512]
+  hidden_layer_sizes: []
 encoder_kwargs:
   encoder: nature
   features_dim: 512
+  padding: SAME
 num_envs: 1
 # 110000, not the gin's 1M: a 100k-env-step run stores exactly 100k transitions, so the
 # circular buffer never wraps and 110000 holds every transition with identical

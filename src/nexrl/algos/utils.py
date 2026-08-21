@@ -238,6 +238,11 @@ def create_env(
             extra_env_kwargs = {}
             if getattr(config, "terminal_on_life_loss", False):
                 extra_env_kwargs["terminal_on_life_loss"] = True
+            # noop_max is Atari-only (DrQ); gate on the namespace so non-Atari envs
+            # (e.g. the CartPole test configs) never see the kwarg.
+            noop_max = getattr(config, "noop_max", None)
+            if noop_max is not None and config.env.startswith("atari/"):
+                extra_env_kwargs["noop_max"] = noop_max
             env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1), **extra_env_kwargs)
         else:
             env = config.env
@@ -318,6 +323,7 @@ def create_encoder(
             rngs=rngs,
             compute_dtype=compute_dtype,
             kernel_init=kernel_init,
+            padding=encoder_config.padding,
         )
     elif encoder_config.encoder == "impala":
         return ImpalaCNNEncoder(

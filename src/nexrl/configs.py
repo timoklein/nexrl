@@ -25,6 +25,11 @@ class CNNConfig:
     encoder: str = "nature"  # "nature" or "impala"
     features_dim: int = 512  # 512 for nature, 256 for impala
     width_scale: int = 1  # channel multiplier for IMPALA encoder
+    # Conv padding (nature encoder only; IMPALA is SAME by design). "VALID" is the
+    # Nature-DQN convention (84x84 -> 7x7x64 = 3136 flat). "SAME" matches Dopamine's
+    # FullRainbowNetwork, whose nn.Conv calls take the Flax default (84x84 -> 11x11x64
+    # = 7744 flat) — the network that produced the published DrQ Atari-100k numbers.
+    padding: str = "VALID"
 
 
 def _dict_to_dataclass(cls: type, d: dict[str, Any]) -> Any:
@@ -346,6 +351,11 @@ class DrQConfig(_BaseConfig):
     shift_pad: int = 4
     intensity_scale: float = 0.05
     terminal_on_life_loss: bool = False  # set true for Atari; create_env plumbs it
+    # Random no-op starts per reset (gymnasium AtariPreprocessing noop_max; train AND
+    # eval). 30 is the gymnasium default and what all runs so far used. The Dopamine
+    # reference applies NO no-ops anywhere — its env is fully deterministic — so 0 is
+    # the reference-faithful value (A/B pending).
+    noop_max: int = 30
     clip_rewards: bool = True  # clip training rewards to [-1, 1]; metrics stay raw
     # Evaluation protocol. `eval_episodes` complete episodes are always played (every
     # slot a real episode — no zero-fill deflation). `eval_step_budget` additionally
