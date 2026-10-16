@@ -72,6 +72,15 @@ from nexrl.networks.fast_sac import (
 from nexrl.networks.fast_sac import (
     FastSACPolicy as FastSACPolicy,
 )
+from nexrl.networks.flash_sac import (
+    FlashSACCritic as FlashSACCritic,
+)
+from nexrl.networks.flash_sac import (
+    FlashSACPolicy as FlashSACPolicy,
+)
+from nexrl.networks.flash_sac import (
+    project_params as project_params,
+)
 from nexrl.networks.mrq import (
     MrQEncoder as MrQEncoder,
 )

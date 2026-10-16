@@ -254,7 +254,7 @@ def create_env(
     else:
         if env_params is None:
             env_params = env.default_params
-    if config.normalize_observations and not has_encoder:
+    if getattr(config, "normalize_observations", False) and not has_encoder:
         env = FloatObsWrapper(env)  # type: ignore[assignment]  # delegates via __getattr__
     return env, env_params  # type: ignore[return-value]
 
@@ -485,7 +485,7 @@ def make_eval_act(
     """
 
     def act(obs, rng):
-        if config.normalize_observations and obs_rms is not None:
+        if getattr(config, "normalize_observations", False) and obs_rms is not None:
             obs = normalize_obs(obs_rms, obs)
         obs = jnp.expand_dims(obs, 0)
         return jnp.squeeze(model_fn(obs, rng))
