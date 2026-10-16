@@ -1,4 +1,5 @@
 import warnings
+from collections.abc import Mapping
 from copy import copy
 from typing import Any
 
@@ -9,19 +10,22 @@ from jax import numpy as jnp
 from mujoco_playground import registry
 
 
-def create_playground(env_name, *, impl="jax", **kwargs):
+def create_playground(env_name, *, impl="jax", obs_key: str | None = None, **kwargs):
     """Create a MuJoCo Playground env wrapped in the gymnax interface.
 
     Args:
         env_name: Playground registry name (e.g. "CartpoleBalance", "CheetahRun").
         impl: MJX physics backend. "jax" (XLA, default) or "warp" (NVIDIA Warp).
+        obs_key: Entry to select when the env returns a dict observation
+            (e.g. "state" or "privileged_state" for locomotion envs). Required for
+            dict observations, rejected otherwise. Not forwarded to config_overrides.
         **kwargs: Passed as config_overrides to the playground registry.
     """
     overrides = {"impl": impl, **kwargs} if kwargs else {"impl": impl}
     env = registry.load(env_name, config_overrides=overrides)
     config = registry.get_default_config(env_name)
     episode_length = int(config.episode_length)
-    wrapped = Playground2GymnaxEnv(env, episode_length)
+    wrapped = Playground2GymnaxEnv(env, episode_length, obs_key=obs_key)
     return wrapped, wrapped.default_params
 
 
@@ -50,9 +54,25 @@ class Playground2GymnaxEnv(GymnaxEnv):
     is lightweight — no jax.pure_callback needed (unlike dm_control).
     """
 
-    def __init__(self, env, episode_length: int):
+    def __init__(self, env, episode_length: int, obs_key: str | None = None):
         self.env = env
         self.episode_length = episode_length
+        self.obs_key = obs_key
+        obs_size = env.observation_size
+        if isinstance(obs_size, Mapping):
+            if obs_key is None:
+                raise ValueError(
+                    f"{type(env).__name__} returns a dict observation; pass obs_key as one of {sorted(obs_size.keys())}."
+                )
+            if obs_key not in obs_size:
+                raise ValueError(f"obs_key={obs_key!r} not in available keys {sorted(obs_size.keys())}.")
+        elif obs_key is not None:
+            raise ValueError(f"{type(env).__name__} has a non-dict observation; obs_key={obs_key!r} is not allowed.")
+
+    def _select_obs(self, obs):
+        if isinstance(obs, Mapping):
+            return obs[self.obs_key]
+        return obs
 
     @property
     def default_params(self):
@@ -62,17 +82,25 @@ class Playground2GymnaxEnv(GymnaxEnv):
         inner = self.env.step(state.inner, action)
         steps = state.steps + 1
         truncated = steps >= self.episode_length
-        done = jnp.logical_or(inner.done.astype(bool), truncated)
+        inner_done = inner.done.astype(bool)
+        done = jnp.logical_or(inner_done, truncated)
         new_state = PlaygroundState(inner=inner, steps=steps)
-        return inner.obs, new_state, inner.reward, done, {}
+        obs = self._select_obs(inner.obs)
+        # gymnax's step() auto-resets and swaps in the reset obs on done, so the pre-reset
+        # obs is only available via info. "truncated" = time limit without physical termination.
+        info = {
+            "truncated": jnp.logical_and(truncated, jnp.logical_not(inner_done)),
+            "final_obs": obs,
+        }
+        return obs, new_state, inner.reward, done, info
 
     def reset_env(self, key, params):
         inner = self.env.reset(key)
         state = PlaygroundState(inner=inner, steps=jnp.int32(0))
-        return inner.obs, state
+        return self._select_obs(inner.obs), state
 
     def get_obs(self, state):
-        return state.inner.obs
+        return self._select_obs(state.inner.obs)
 
     def is_terminal(self, state):
         return jnp.logical_or(
@@ -90,7 +118,10 @@ class Playground2GymnaxEnv(GymnaxEnv):
 
     def observation_space(self, params):
         obs_size = self.env.observation_size
-        return spaces.Box(low=-jnp.inf, high=jnp.inf, shape=(obs_size,))
+        if isinstance(obs_size, Mapping):
+            obs_size = obs_size[self.obs_key]
+        shape = tuple(obs_size) if isinstance(obs_size, (tuple, list)) else (obs_size,)
+        return spaces.Box(low=-jnp.inf, high=jnp.inf, shape=shape)
 
     @property
     def num_actions(self) -> int:

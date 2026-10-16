@@ -243,6 +243,10 @@ def create_env(
             noop_max = getattr(config, "noop_max", None)
             if noop_max is not None and config.env.startswith("atari/"):
                 extra_env_kwargs["noop_max"] = noop_max
+            # obs_key selects one entry of a dict observation; playground-only (locomotion envs).
+            obs_key = getattr(config, "obs_key", None)
+            if obs_key is not None and config.env.startswith("playground/"):
+                extra_env_kwargs["obs_key"] = obs_key
             env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1), **extra_env_kwargs)
         else:
             env = config.env
