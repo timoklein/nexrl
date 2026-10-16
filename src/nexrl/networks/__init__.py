@@ -72,6 +72,12 @@ from nexrl.networks.fast_sac import (
 from nexrl.networks.fast_sac import (
     FastSACPolicy as FastSACPolicy,
 )
+from nexrl.networks.fast_td3 import (
+    FastTD3Critic as FastTD3Critic,
+)
+from nexrl.networks.fast_td3 import (
+    FastTD3Policy as FastTD3Policy,
+)
 from nexrl.networks.flash_sac import (
     FlashSACCritic as FlashSACCritic,
 )
