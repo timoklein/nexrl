@@ -208,20 +208,20 @@ def train_fast_sac(
 
     # --- Collect transitions ---
     def collect_transitions(carry, actor, rngs):
-        last_obs = carry.last_obs
+        last_obs_BD = carry.last_obs
         if config.normalize_observations:
-            last_obs = normalize_obs(carry.obs_rms, last_obs)
+            last_obs_BD = normalize_obs(carry.obs_rms, last_obs_BD)
 
         # Stochastic policy action, also during warm-up (the zero-init heads give mean 0)
-        action_BA, _ = actor(last_obs, rngs())
+        action_BA, _ = actor(last_obs_BD, rngs())
 
         rng_steps = jax.random.split(rngs(), num_envs)
-        next_obs, new_env_state, reward_B, done_B, info = vmap_step(rng_steps, carry.env_state, action_BA, env_params)
+        next_obs_BD, new_env_state, reward_B, done_B, info = vmap_step(rng_steps, carry.env_state, action_BA, env_params)
 
         # Bootstrap through time-limit truncations. Adapters that report them also report the
         # pre-reset obs, which gymnax's autoreset overwrites; elsewhere every done is terminal.
         truncated_B = info.get("truncated", jnp.zeros_like(done_B))
-        final_obs = info.get("final_obs", next_obs)
+        final_obs_BD = info.get("final_obs", next_obs_BD)
         terminated_B = jnp.logical_and(done_B, jnp.logical_not(truncated_B))
 
         # Track episode returns using raw rewards
@@ -235,10 +235,10 @@ def train_fast_sac(
             action=action_BA,
             reward=reward_B.astype(jnp.float32),
             terminated=terminated_B.astype(jnp.float32),
-            next_obs=final_obs.astype(jnp.float32),
+            next_obs=final_obs_BD.astype(jnp.float32),
         )
         return carry._replace(
-            last_obs=next_obs,
+            last_obs=next_obs_BD,
             env_state=new_env_state,
             global_step=carry.global_step + num_envs,
             replay_buffer=carry.replay_buffer.append(transition),
