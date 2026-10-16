@@ -1,7 +1,7 @@
 """RL algorithm implementations.
 
 On-policy: ppo, ppg, ppo_icm, ppo_e3b, ppo_rnd, ppo_rnn, vmpo, vmpo_continuous
-Off-policy continuous: sac, sac_simba, fast_sac, flash_sac, td3, mpo_continuous
+Off-policy continuous: sac, sac_simba, fast_sac, flash_sac, td3, fast_td3, mpo_continuous
 Off-policy discrete: dqn, iqn, pqn, rainbow, mpo
 Model-based: alphazero, muzero, dreamer, sgf
 Off-policy dual-mode: mrq, mrsq
@@ -15,6 +15,7 @@ from .dreamer import train_dreamer
 from .drq import train_drq
 from .drqv2 import train_drqv2
 from .fast_sac import train_fast_sac
+from .fast_td3 import train_fast_td3
 from .flash_sac import train_flash_sac
 from .iqn import train_iqn
 from .mpo import train_mpo
@@ -46,6 +47,7 @@ __all__ = [
     "train_drq",
     "train_drqv2",
     "train_fast_sac",
+    "train_fast_td3",
     "train_flash_sac",
     "train_iqn",
     "train_mpo",

@@ -320,6 +320,37 @@ class FlashSACConfig(_BaseConfig):
 
 
 @dataclasses.dataclass(frozen=True)
+class FastTD3Config(_BaseConfig):
+    # Defaults: RL-X fasttd3/flax_full_jit default_config + its G1 env config (4096 envs).
+    env: str = "playground/G1JoystickFlatTerrain"
+    obs_key: str | None = "privileged_state"  # dict-obs entry fed to actor and critic (Playground)
+    num_envs: int = 4_096
+    buffer_size_per_env: int = 10_240  # ring rows per env (total = buffer_size_per_env * num_envs)
+    learning_starts: int = 10  # vectorized env steps (x num_envs transitions) before the first update
+    batch_size: int = 32_768
+    actor_hidden_layer_sizes: tuple[int, ...] = (512, 256, 128)
+    critic_hidden_layer_sizes: tuple[int, ...] = (1024, 512, 256)
+    learning_rate: float = 3e-4  # actor and critic
+    weight_decay: float = 0.1  # AdamW
+    total_timesteps: int = 2_000_158_720
+    eval_freq: int = 18_350_080
+    gamma: float = 0.97
+    polyak: float = 0.9  # reference tau=0.1, applied after every critic update
+    num_atoms: int = 101
+    v_min: float = -10.0
+    v_max: float = 10.0
+    noise_std_min: float = 0.001  # per-env exploration noise std ~ U(min, max), resampled at episode end
+    noise_std_max: float = 0.4
+    smoothing_noise_std: float = 0.001  # target policy smoothing noise std ...
+    smoothing_noise_clip: float = 0.5  # ... clipped to +-this
+    num_critic_updates_per_policy_update: int = 2
+    num_policy_updates_per_step: int = 1  # critic updates per env step = 2 * 1 = 2
+    normalize_observations: bool = True
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class TD3Config(_BaseConfig):
     env: str = "Pendulum-v1"
     actor_kwargs: NetworkConfig = dataclasses.field(default_factory=NetworkConfig)
@@ -1103,6 +1134,7 @@ ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "sac_simba": SACSimBaConfig,
     "fast_sac": FastSACConfig,
     "flash_sac": FlashSACConfig,
+    "fast_td3": FastTD3Config,
     "td3": TD3Config,
     "dqn": DQNConfig,
     "iqn": IQNConfig,
