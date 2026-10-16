@@ -274,7 +274,7 @@ def train_fast_td3(
         projected_CBN = jax.vmap(project_BN, in_axes=(None, 0, None))(target_support_BN, target_probs_CBN, support_N)
         projected_CBN = jnp.asarray(jax.lax.stop_gradient(projected_CBN))
 
-        # Both critics learn from the projection with the lower expected value (ties pick critic 1)
+        # Both critics learn from the projection with the lower expected value (ties pick the second critic)
         target_q_CB = (projected_CBN * support_N).sum(axis=-1)
         pick_first_B1 = jnp.expand_dims(target_q_CB[0] < target_q_CB[1], -1)
         target_dist_BN = jnp.where(pick_first_B1, projected_CBN[0], projected_CBN[1])
