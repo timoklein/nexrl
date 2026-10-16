@@ -25,6 +25,7 @@ uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml --learning-
 uv run python train.py ppo --env Pendulum-v1 --agent-kwargs.activation tanh
 uv run python train.py sac_simba --config configs/sac_simba/gymnax/pendulum.yaml
 uv run python train.py fast_sac --config configs/fast_sac/playground/g1_joystick_flat_terrain.yaml
+uv run python train.py flash_sac --config configs/flash_sac/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py dqn --config configs/dqn/atari/breakout.yaml
 uv run python train.py drq --config configs/drq/atari/breakout.yaml
 uv run python train.py ppo --config configs/ppo/atari/breakout.yaml
@@ -48,6 +49,7 @@ CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/ca
 | this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | RR=1, num_envs=1, eval_freq 10k (10x128-ep evals) | 52 eff. | 8.8 GB | 3/GPU, near-linear (CPU-bound on ALE) | 2026-08-20 |
 | this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | reference net (SAME/7744), eval_freq 100k (1x400-ep final eval) | ~97 eff. (17.3 min/run) | — | 3/GPU | 2026-08-21 |
 | this box (A100-PCIE-40GB) | FastSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 8192, 8 critic updates/step), 102.4M steps, no eval | ~16.1k train (~14.9k incl. 2.5 min compile) | 10.2 GB | — | 2026-10-16 |
+| this box (A100-PCIE-40GB) | FlashSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 2048, 2 critic updates/step, 10M buffer), 50M steps, no eval | ~43k train (~26k incl. ~12 min compile) | 36.1 GB (mostly the 10M-row buffer) | 1/GPU | 2026-10-16 |
 
 Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
 the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`
@@ -60,7 +62,7 @@ adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
 When implementing or modifying algorithms, verify correctness using benchmark environments:
 
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q, SGF)
-- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
+- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
 - **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
@@ -201,6 +203,16 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **Obs RMS is updated from the sampled batch** (obs + next_obs of all U batches), not from fresh env obs; warm-up acts with the identity-initialized normalizer.
 - Buffer is a `(buffer_size_per_env, num_envs)` ring (`CircularBuffer.append` of one row per vectorized step); sampling draws a row and an env uniformly.
 
+### FlashSAC
+
+- **Reference is RL-X `flashsac/flax_full_jit`** (default path only: n_steps=1, no LR warmup). Defaults in `FlashSACConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`). `total_timesteps` is rounded up to a multiple of 4096.
+- **`project_params` runs after EVERY actor and critic optimizer step and at init, never on the target.** The target gets Polyak only. Kernels get unit column norm, RMSNorm scales and BatchNorm concat(scale, bias) get norm sqrt(d).
+- **CrossQ-style BatchNorm**: the policy loss runs a train-mode forward on concat(s, s'). The critic loss does the same for both the online and the target critic. The target BN stats update from its own forward, so the target is a module ARGUMENT to the loss, not a closure.
+- **BN mode per call site**: collection, eval, next-action sampling and the critic inside the policy loss use running averages (`train=False`). Only the forwards above use batch statistics.
+- **Update order**: policy + alpha update runs BEFORE the critic update in each update step, every `policy_delay` update steps counted globally (`update_count` in the carry).
+- **No obs normalization** (input BatchNorm instead). Rewards are scaled at sample time by max(sqrt(var(G)+1e-8), G_max/normalized_g_max), so returns stay within +-5, the default support. Absolute Q values in tests need `normalize_rewards=False`.
+- Actions are in [-1, 1] in buffer and networks and rescaled to the env range only at the env boundary. Exploration noise is held for zeta(2)-distributed steps (<=16), with one hold count shared across envs. Actions are uniform random until `learning_starts` timesteps.
+
 ### DrQ-v2
 
 - **No target encoder/actor** — only `critic_target` with Polyak averaging.
@@ -226,7 +238,7 @@ Choices intentionally rejected. Do not attempt without discussion.
 
 | Decision | Rationale |
 |----------|-----------|
-| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
+| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, SAC/FlashSAC, FastSAC/FlashSAC, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
 | **Don't extract Trajectory/AdvantageMinibatch to utils** | V-MPO's variant differs; ~30 LOC per file preserves self-containedness |
 | **Don't use config inheritance** | Explicit field duplication keeps each config independently readable; inheritance changes dataclass field ordering |
 | **Don't extract metrics accumulation helpers** | Interleaved with carry updates; `x * 0` tracing semantics would be obscured |

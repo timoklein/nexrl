@@ -285,6 +285,41 @@ class FastSACConfig(_BaseConfig):
 
 
 @dataclasses.dataclass(frozen=True)
+class FlashSACConfig(_BaseConfig):
+    # Defaults: RL-X flashsac/flax_full_jit default_config + its G1 env config (4096 envs).
+    # No observation normalization: the networks' input BatchNorm takes its place.
+    env: str = "playground/G1JoystickFlatTerrain"
+    obs_key: str | None = "privileged_state"  # dict-obs entry fed to actor and critic (Playground)
+    num_envs: int = 4_096
+    buffer_size: int = 10_000_000  # transitions in total; ring rows per env = buffer_size // num_envs
+    learning_starts: int = 100_000  # timesteps of uniform random actions before the first update
+    batch_size: int = 2_048
+    updates_per_step: int = 2  # critic updates per vectorized env step
+    policy_delay: int = 2  # policy + alpha update every policy_delay critic updates
+    learning_rate: float = 3e-4  # cosine decay from here, for actor, critic and alpha
+    learning_rate_end: float = 1.5e-4
+    total_timesteps: int = 50_003_968  # reference 50_000_896 rounded up to a multiple of 4096 envs
+    eval_freq: int = 6_250_496
+    gamma: float = 0.99
+    polyak: float = 0.99  # reference tau=0.01, applied after every critic update
+    actor_hidden_dim: int = 128
+    actor_num_blocks: int = 2
+    critic_hidden_dim: int = 256
+    critic_num_blocks: int = 2
+    num_atoms: int = 101
+    v_min: float = -5.0
+    v_max: float = 5.0
+    initial_alpha: float = 0.01
+    target_entropy_sigma: float = 0.15  # target entropy = entropy of a Gaussian with this std per action dim
+    normalize_rewards: bool = True
+    normalized_g_max: float = 5.0  # reward scale keeps |return| <= this
+    noise_zeta_mu: float = 2.0  # exploration noise is held for n ~ zeta(mu) steps ...
+    noise_zeta_max: int = 16  # ... truncated at noise_zeta_max
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class TD3Config(_BaseConfig):
     env: str = "Pendulum-v1"
     actor_kwargs: NetworkConfig = dataclasses.field(default_factory=NetworkConfig)
@@ -1067,6 +1102,7 @@ ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "sac": SACConfig,
     "sac_simba": SACSimBaConfig,
     "fast_sac": FastSACConfig,
+    "flash_sac": FlashSACConfig,
     "td3": TD3Config,
     "dqn": DQNConfig,
     "iqn": IQNConfig,
