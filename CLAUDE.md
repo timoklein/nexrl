@@ -24,6 +24,7 @@ uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml
 uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml --learning-rate 0.001
 uv run python train.py ppo --env Pendulum-v1 --agent-kwargs.activation tanh
 uv run python train.py sac_simba --config configs/sac_simba/gymnax/pendulum.yaml
+uv run python train.py fast_sac --config configs/fast_sac/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py dqn --config configs/dqn/atari/breakout.yaml
 uv run python train.py drq --config configs/drq/atari/breakout.yaml
 uv run python train.py ppo --config configs/ppo/atari/breakout.yaml
@@ -58,7 +59,7 @@ adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
 When implementing or modifying algorithms, verify correctness using benchmark environments:
 
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q, SGF)
-- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
+- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
 - **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
@@ -116,7 +117,7 @@ All `train_*` return `(TrainState, Metrics)` where `Metrics = dict[str, jax.Arra
 
 Tensor variable names use uppercase dimension suffixes (e.g. `obs_BD`, `action_BA`, `q_target_CB`). Each file has a dimension key comment.
 
-**Dimension codebook:** `B` batch, `D` obs dim, `A` action dim, `H` hidden, `T` trajectory len, `C` num critics, `K` quantile samples (IQN), `E` cosine embed (IQN), `L` ICM latent, `N` atoms (distributional), `P` PPG aux buffer, `S` latent state (MuZero/MrQ zs), `X` zsa (MrQ/MRS.Q), `Q` Q-ensemble (MRS.Q), `G` RSSM deter, `Z` RSSM stoch, `I` imagination horizon, `F` CNN features.
+**Dimension codebook:** `B` batch, `D` obs dim, `A` action dim, `H` hidden, `T` trajectory len, `C` num critics, `K` quantile samples (IQN), `E` cosine embed (IQN), `L` ICM latent, `N` atoms (distributional), `P` PPG aux buffer, `S` latent state (MuZero/MrQ zs), `X` zsa (MrQ/MRS.Q), `Q` Q-ensemble (MRS.Q), `G` RSSM deter, `Z` RSSM stoch, `I` imagination horizon, `F` CNN features, `U` critic updates per env step (FastSAC).
 
 **Rules:**
 - Rename **local variables only** — never NamedTuple fields, function parameters, dict keys, or network method signatures
@@ -189,6 +190,16 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **Reference network layout**: conv (padding **SAME** — Flax `nn.Conv` default in Dopamine's `FullRainbowNetwork`, flatten 11×11×64=7744) → Dense(512) → ReLU → dueling heads, 4.05M params. The single 512 hidden layer is the ENCODER's dense, so the yaml sets `agent_kwargs.hidden_layer_sizes: []` and `encoder_kwargs.padding: SAME`. Adding `[512]` back creates a second hidden layer the reference doesn't have; `padding: VALID` (Nature-DQN canon, other algos' default) shrinks the trunk to 3136/1.95M.
 - `noop_max` (train+eval no-op starts) defaults to gymnasium's 30; the Dopamine reference applies NONE — `--noop-max 0` is reference-faithful (A/B pending).
 
+### FastSAC
+
+- **Reference is RL-X `fastsac/flax_full_jit`** (default path only: n_steps=1, no clipped double-Q, no grad clipping, no LR anneal). Defaults in `FastSACConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
+- **Truncations bootstrap**: the Playground adapter puts `truncated` (time limit without physical termination) and `final_obs` (pre-reset obs, which gymnax's autoreset overwrites) in `info`. FastSAC reads them with `.get` defaults, so on envs without these keys every done is terminal, like nexrl SAC.
+- **Each critic learns from its own target critic's projection** (no min over critics); the policy loss uses the mean of the two expected Qs.
+- **Alpha loss uses the next-state log-probs of the critic step** and is in the same gradient call as the critic loss. log_alpha has its own AdamW, weight decay included — the reference's choice, which pulls α toward 1.
+- **Polyak (τ=0.125) runs after every critic update** (8 per env step), not once per env step.
+- **Obs RMS is updated from the sampled batch** (obs + next_obs of all U batches), not from fresh env obs; warm-up acts with the identity-initialized normalizer.
+- Buffer is a `(buffer_size_per_env, num_envs)` ring (`CircularBuffer.append` of one row per vectorized step); sampling draws a row and an env uniformly.
+
 ### DrQ-v2
 
 - **No target encoder/actor** — only `critic_target` with Polyak averaging.
@@ -214,7 +225,7 @@ Choices intentionally rejected. Do not attempt without discussion.
 
 | Decision | Rationale |
 |----------|-----------|
-| **Don't unify algorithm pairs** (SAC/SimBa, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
+| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
 | **Don't extract Trajectory/AdvantageMinibatch to utils** | V-MPO's variant differs; ~30 LOC per file preserves self-containedness |
 | **Don't use config inheritance** | Explicit field duplication keeps each config independently readable; inheritance changes dataclass field ordering |
 | **Don't extract metrics accumulation helpers** | Interleaved with carry updates; `x * 0` tracing semantics would be obscured |

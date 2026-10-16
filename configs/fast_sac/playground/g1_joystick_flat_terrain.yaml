@@ -1,0 +1,28 @@
+# RL-X fastsac/flax_full_jit default_config + mujoco_playground/g1_joystick_flat_terrain (4096 envs).
+env: playground/G1JoystickFlatTerrain
+obs_key: privileged_state  # RL-X feeds the privileged state to actor and critic
+num_envs: 4096
+buffer_size_per_env: 1024  # ring rows per env
+learning_starts: 10  # vectorized env steps
+batch_size: 8192
+actor_hidden_layer_sizes: [512, 256, 128]
+critic_hidden_layer_sizes: [768, 384, 192]
+learning_rate: 0.0003
+weight_decay: 0.001
+adam_beta1: 0.9
+adam_beta2: 0.95
+total_timesteps: 2000158720
+eval_freq: 18350080
+gamma: 0.97
+polyak: 0.875  # reference tau 0.125
+num_atoms: 101
+v_min: -20.0
+v_max: 20.0
+target_entropy: 0.0
+initial_alpha: 0.001
+log_std_min: -5.0
+log_std_max: 0.0
+num_critic_updates_per_policy_update: 4
+num_policy_updates_per_step: 2
+normalize_observations: true
+run_evaluation: false
