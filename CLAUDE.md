@@ -49,6 +49,7 @@ CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/ca
 | this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | RR=1, num_envs=1, eval_freq 10k (10x128-ep evals) | 52 eff. | 8.8 GB | 3/GPU, near-linear (CPU-bound on ALE) | 2026-08-20 |
 | this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | reference net (SAME/7744), eval_freq 100k (1x400-ep final eval) | ~97 eff. (17.3 min/run) | — | 3/GPU | 2026-08-21 |
 | this box (A100-PCIE-40GB) | FastSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 8192, 8 critic updates/step), 102.4M steps, no eval | ~16.1k train (~14.9k incl. 2.5 min compile) | 10.2 GB | — | 2026-10-16 |
+| this box (A100-PCIE-40GB) | FlashSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 2048, 2 critic updates/step, 10M buffer), 50M steps, no eval | ~43k train (~26k incl. ~12 min compile) | 36.1 GB (mostly the 10M-row buffer) | 1/GPU | 2026-10-16 |
 
 Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
 the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`

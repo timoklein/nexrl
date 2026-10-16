@@ -157,8 +157,8 @@ class _CategoricalQ(nnx.Module):
         )
 
     def __call__(self, obs: jax.Array, action: jax.Array, train: bool) -> jax.Array:
-        x_BD = jnp.concatenate([obs, action], axis=-1)
-        return self.logits(self.trunk(x_BD, train))  # (B, N)
+        obs_action = jnp.concatenate([obs, action], axis=-1)  # (B, D + A)
+        return self.logits(self.trunk(obs_action, train))  # (B, N)
 
 
 class FlashSACCritic(nnx.Module):
