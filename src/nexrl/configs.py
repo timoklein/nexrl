@@ -252,6 +252,39 @@ class SACSimBaConfig(_BaseConfig):
 
 
 @dataclasses.dataclass(frozen=True)
+class FastSACConfig(_BaseConfig):
+    # Defaults: RL-X fastsac/flax_full_jit default_config + its G1 env config (4096 envs).
+    env: str = "playground/G1JoystickFlatTerrain"
+    obs_key: str | None = "privileged_state"  # dict-obs entry fed to actor and critic (Playground)
+    num_envs: int = 4_096
+    buffer_size_per_env: int = 1_024  # ring rows per env (total = buffer_size_per_env * num_envs)
+    learning_starts: int = 10  # vectorized env steps (x num_envs transitions) before the first update
+    batch_size: int = 8_192
+    actor_hidden_layer_sizes: tuple[int, ...] = (512, 256, 128)
+    critic_hidden_layer_sizes: tuple[int, ...] = (768, 384, 192)
+    learning_rate: float = 3e-4  # actor, critic and alpha
+    weight_decay: float = 1e-3  # AdamW, also applied to log_alpha
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    total_timesteps: int = 2_000_158_720
+    eval_freq: int = 18_350_080
+    gamma: float = 0.97
+    polyak: float = 0.875  # reference tau=0.125, applied after every critic update
+    num_atoms: int = 101
+    v_min: float = -20.0
+    v_max: float = 20.0
+    target_entropy: float = 0.0
+    initial_alpha: float = 0.001
+    log_std_min: float = -5.0
+    log_std_max: float = 0.0
+    num_critic_updates_per_policy_update: int = 4
+    num_policy_updates_per_step: int = 2  # critic updates per env step = 4 * 2 = 8
+    normalize_observations: bool = True
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class TD3Config(_BaseConfig):
     env: str = "Pendulum-v1"
     actor_kwargs: NetworkConfig = dataclasses.field(default_factory=NetworkConfig)
@@ -1033,6 +1066,7 @@ ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "ppo_e3b": PPOE3BConfig,
     "sac": SACConfig,
     "sac_simba": SACSimBaConfig,
+    "fast_sac": FastSACConfig,
     "td3": TD3Config,
     "dqn": DQNConfig,
     "iqn": IQNConfig,

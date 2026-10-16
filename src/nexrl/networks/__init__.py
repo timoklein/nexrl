@@ -66,6 +66,12 @@ from nexrl.networks.exploration import (
 from nexrl.networks.exploration import (
     RNDModule as RNDModule,
 )
+from nexrl.networks.fast_sac import (
+    FastSACCritic as FastSACCritic,
+)
+from nexrl.networks.fast_sac import (
+    FastSACPolicy as FastSACPolicy,
+)
 from nexrl.networks.mrq import (
     MrQEncoder as MrQEncoder,
 )
