@@ -104,6 +104,7 @@ uv run python train.py dreamer --config configs/dreamer/gymnax/cartpole.yaml --i
 | [SAC](src/nexrl/algos/sac.py) | [Haarnoja et al., 2018](https://arxiv.org/abs/1812.05905) | | x |
 | [SAC-SimBa](src/nexrl/algos/sac_simba.py) | [Lee et al., 2024](https://arxiv.org/abs/2410.09754) | | x |
 | [FastSAC](src/nexrl/algos/fast_sac.py) | [Seo et al., 2025](https://arxiv.org/abs/2512.01996) | | x |
+| [FlashSAC](src/nexrl/algos/flash_sac.py) | [Kim, Lee et al., 2026](https://github.com/Holiday-Robot/FlashSAC) | | x |
 | [TD3](src/nexrl/algos/td3.py) | [Fujimoto et al., 2018](https://arxiv.org/abs/1802.09477) | | x |
 | [DQN](src/nexrl/algos/dqn.py) | [Mnih et al., 2015](https://arxiv.org/abs/1312.5602) | x | |
 | [IQN](src/nexrl/algos/iqn.py) | [Dabney et al., 2018](https://arxiv.org/abs/1806.06923) | x | |
