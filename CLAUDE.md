@@ -27,6 +27,7 @@ uv run python train.py sac_simba --config configs/sac_simba/gymnax/pendulum.yaml
 uv run python train.py fast_sac --config configs/fast_sac/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py flash_sac --config configs/flash_sac/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py fast_td3 --config configs/fast_td3/playground/g1_joystick_flat_terrain.yaml
+uv run python train.py xqc --config configs/xqc/playground/humanoid_run.yaml
 uv run python train.py dqn --config configs/dqn/atari/breakout.yaml
 uv run python train.py drq --config configs/drq/atari/breakout.yaml
 uv run python train.py bbf --config configs/bbf/atari/breakout.yaml
@@ -65,7 +66,7 @@ adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
 When implementing or modifying algorithms, verify correctness using benchmark environments:
 
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q)
-- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, FastTD3, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
+- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, FastTD3, XQC, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
 - **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF, SGF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
@@ -220,6 +221,18 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **No obs normalization** (input BatchNorm instead). Rewards are scaled at sample time by max(sqrt(var(G)+1e-8), G_max/normalized_g_max), so returns stay within +-5, the default support. Absolute Q values in tests need `normalize_rewards=False`.
 - Actions are in [-1, 1] in buffer and networks and rescaled to the env range only at the env boundary. Exploration noise is held for zeta(2)-distributed steps (<=16), with one hold count shared across envs. Actions are uniform random until `learning_starts` timesteps.
 
+### XQC
+
+- **Reference is RL-X `xqc/flax`** (host loop, numpy buffer, 1 env). nexrl runs the same math in one jitted loop. Default path only. Defaults in `XQCConfig` = reference `default_config`. The default env is playground/HumanoidRun: RL-X uses DMC humanoid-run with no action repeat, while the paper's DMC curves use action repeat 2.
+- **Weight norm** (unit column norm of every Linear kernel, heads included) runs at init and after every actor and critic optimizer step, never on the target. Biases and BatchNorm params are untouched. Unlike FlashSAC's `project_params`, there is no eps and no norm constraint on BatchNorm.
+- **CrossQ-style BatchNorm on the critic only**: the online and target critic both run train mode on concat(s, s'). The next action uses the policy in eval mode. The policy loss runs the policy in train mode on s only, against the just-updated critic in eval mode.
+- **Update order**: critic step, then Polyak (tau 0.005, after every critic step), then the policy forward. The policy BatchNorm stats update on every update. The policy Adam step, its weight norm and the alpha step run every `policy_delay=3` updates (`update_count` is global, update 0 included).
+- **Twin C51 critic**: both critics train on the projection of the target critic with the lower expected value. The loss sums the two critics' cross-entropies. The policy maximizes the min over critics.
+- **Rewards are divided at sample time** by sqrt(var(G)) + 1e-8, G the running discounted return. The statistic updates every env step including warm-up. Absolute Q values in tests need `normalize_rewards=False`.
+- **LR decays linearly** 3e-4 -> 3e-5 over `(total_timesteps // num_envs) * updates_per_step` optimizer steps. Each optimizer counts its own steps, so the policy and alpha LRs only decay a third of the way (reference behavior).
+- **Eval is off by default** (the reference's `evaluation_frequency = -1`). The yamls turn it on.
+- **Truncation bootstrap** as in FastSAC (`info["truncated"]`, `info["final_obs"]`).
+
 ### FastTD3
 
 - **Reference is RL-X `fasttd3/flax_full_jit`** (default path only: n_steps=1, clipped double-Q on, no grad clipping, no LR anneal). Defaults in `FastTD3Config` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
@@ -254,7 +267,7 @@ Choices intentionally rejected. Do not attempt without discussion.
 
 | Decision | Rationale |
 |----------|-----------|
-| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, SAC/FlashSAC, FastSAC/FlashSAC, FastSAC/FastTD3, TD3/FastTD3, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
+| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, SAC/FlashSAC, SAC/XQC, FastSAC/FlashSAC, FlashSAC/XQC, FastSAC/FastTD3, TD3/FastTD3, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
 | **Don't extract Trajectory/AdvantageMinibatch to utils** | V-MPO's variant differs; ~30 LOC per file preserves self-containedness |
 | **Don't use config inheritance** | Explicit field duplication keeps each config independently readable; inheritance changes dataclass field ordering |
 | **Don't extract metrics accumulation helpers** | Interleaved with carry updates; `x * 0` tracing semantics would be obscured |
