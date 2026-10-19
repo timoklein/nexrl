@@ -24,10 +24,38 @@ jobs:
       - run: uv sync --group dev
       - run: uv run pyright src/nexrl/
 
+  # The suite is ~47 min of CPU training run serially, so it is split into 4 parallel shards of
+  # ~12 min each, balanced by per-file CI times. New test files land in the "rest" shard.
   test:
+    name: test (${{ matrix.shard }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: mpo-continuous-1
+            paths: >-
+              tests/test_mpo_continuous.py::test_env1_continuous
+              tests/test_mpo_continuous.py::test_env2_continuous
+              tests/test_mpo_continuous.py::test_env3_continuous
+              tests/test_dqn.py tests/test_pqn.py tests/test_drq.py tests/test_dreamer.py
+          - shard: mpo-continuous-2
+            paths: >-
+              tests/test_mpo_continuous.py
+              --deselect tests/test_mpo_continuous.py::test_env1_continuous
+              --deselect tests/test_mpo_continuous.py::test_env2_continuous
+              --deselect tests/test_mpo_continuous.py::test_env3_continuous
+              tests/test_fast_sac.py
+          - shard: sac-simba
+            paths: tests/test_sac_simba.py
+          - shard: rest
+            paths: >-
+              tests/
+              --ignore tests/test_mpo_continuous.py --ignore tests/test_sac_simba.py
+              --ignore tests/test_fast_sac.py --ignore tests/test_dqn.py --ignore tests/test_pqn.py
+              --ignore tests/test_drq.py --ignore tests/test_dreamer.py
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --group dev
-      - run: uv run pytest tests/ -m "not slow" --tb=short
+      - run: uv run pytest ${{ matrix.paths }} -m "not slow" --tb=short
