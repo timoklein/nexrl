@@ -54,6 +54,7 @@ CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/ca
 | this box (A100-PCIE-40GB) | FastSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 8192, 8 critic updates/step), 102.4M steps, no eval | ~16.1k train (~14.9k incl. 2.5 min compile) | 10.2 GB | — | 2026-10-16 |
 | this box (A100-PCIE-40GB) | FlashSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 2048, 2 critic updates/step, 10M buffer), 50M steps, no eval | ~43k train (~26k incl. ~12 min compile) | 36.1 GB (mostly the 10M-row buffer) | 1/GPU | 2026-10-16 |
 | this box (A100-PCIE-40GB) | FastTD3 playground/G1JoystickFlatTerrain | reference config except buffer 3072 rows/env (4096 envs, batch 32768, 2 critic updates/step), 102.4M steps, 8 evals of 128 eps | ~15.3k incl. eval (~13.8k incl. ~12 min compile) | 23.0 GB (buffer 4096 rows/env OOMs) | 1/GPU | 2026-10-16 |
+| this box (A100-PCIE-40GB) | XQC playground/HumanoidRun | reference config (1 env, batch 256, 2 critic updates/step), 1M steps, 3 vmapped seeds, 10 evals of 128 eps | ~190 total over 3 seeds (~63 per seed), incl. eval and compile (4.4 h) | ~3.7 GB (nvidia-smi sample at 100k, preallocation off) | 3 seeds vmapped on 1 GPU | 2026-10-19 |
 
 Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
 the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`
