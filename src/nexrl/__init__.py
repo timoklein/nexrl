@@ -28,6 +28,7 @@ from nexrl.algos import (
     train_td3,
     train_vmpo,
     train_vmpo_continuous,
+    train_xqc,
 )
 from nexrl.configs import (
     ALGO_CONFIG_MAP,
@@ -61,6 +62,7 @@ from nexrl.configs import (
     SimBaNetworkConfig,
     TD3Config,
     VMPOConfig,
+    XQCConfig,
 )
 from nexrl.types import Metrics, TrainFn
 
@@ -95,6 +97,7 @@ _train_fns: dict[str, TrainFn] = {
     "sac_simba": train_sac_simba,
     "sgf": train_sgf,
     "td3": train_td3,
+    "xqc": train_xqc,
 }
 
 
@@ -136,6 +139,7 @@ __all__ = [
     "SimBaNetworkConfig",
     "TD3Config",
     "VMPOConfig",
+    "XQCConfig",
     "get_train_fn",
     "train_alphazero",
     "train_bbf",
@@ -166,4 +170,5 @@ __all__ = [
     "train_td3",
     "train_vmpo",
     "train_vmpo_continuous",
+    "train_xqc",
 ]

@@ -320,6 +320,43 @@ class FlashSACConfig(_BaseConfig):
 
 
 @dataclasses.dataclass(frozen=True)
+class XQCConfig(_BaseConfig):
+    # Defaults: RL-X xqc/flax default_config (one env, host loop in the reference).
+    # No observation normalization: the networks' input BatchNorm takes its place.
+    env: str = "playground/HumanoidRun"
+    obs_key: str | None = None  # dict-obs entry fed to actor and critic (Playground); HumanoidRun obs is flat
+    num_envs: int = 1
+    buffer_size: int = 1_000_000  # transitions in total; ring rows per env = buffer_size // num_envs
+    learning_starts: int = 5_000  # timesteps of uniform random actions; updates start once exceeded
+    batch_size: int = 256
+    updates_per_step: int = 2  # critic updates per vectorized env step
+    policy_delay: int = 3  # policy + alpha step every policy_delay updates (policy BN stats every update)
+    actor_learning_rate: float = 3e-4  # linear decay from each of these to learning_rate_end
+    critic_learning_rate: float = 3e-4
+    alpha_learning_rate: float = 3e-4
+    learning_rate_end: float = 3e-5
+    total_timesteps: int = 1_000_000
+    eval_freq: int = 50_000
+    gamma: float = 0.99
+    polyak: float = 0.995  # reference tau=0.005, applied after every critic update
+    actor_hidden_dim: int = 256
+    actor_num_blocks: int = 4
+    critic_hidden_dim: int = 512
+    critic_num_blocks: int = 4
+    num_critics: int = 2
+    num_atoms: int = 101
+    v_min: float = -5.0
+    v_max: float = 5.0
+    log_std_min: float = -10.0
+    log_std_max: float = 2.0
+    initial_alpha: float = 0.01
+    target_entropy: float | None = None  # None = reference "auto" = -action_dim / 2
+    normalize_rewards: bool = True  # divide by the running std of the discounted return
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class FastTD3Config(_BaseConfig):
     # Defaults: RL-X fasttd3/flax_full_jit default_config + its G1 env config (4096 envs).
     env: str = "playground/G1JoystickFlatTerrain"
@@ -1134,6 +1171,7 @@ ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "sac_simba": SACSimBaConfig,
     "fast_sac": FastSACConfig,
     "flash_sac": FlashSACConfig,
+    "xqc": XQCConfig,
     "fast_td3": FastTD3Config,
     "td3": TD3Config,
     "dqn": DQNConfig,
