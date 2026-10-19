@@ -127,8 +127,9 @@ def test_env4():
 
 def test_env5():
     # Reward is -|action - obs|: Q is higher at the matching action than far from it, and the
-    # policy outputs the observation
-    state, _ = _train(TestEnv5Continuous())
+    # policy outputs the observation. At 8192 steps the action gap sits at the 0.15 tolerance
+    # (seeds 0-4 give 0.10-0.20 on main); 16384 steps give 0.07-0.10.
+    state, _ = _train(TestEnv5Continuous(), total_timesteps=16_384, eval_freq=16_384)
 
     rng = jax.random.PRNGKey(0)
     obs = jax.random.uniform(rng, (10, 1), minval=-1, maxval=1)

@@ -3,6 +3,8 @@ import importlib
 import jax
 from gymnax import make as _gymnax_make
 
+from nexrl.compat.gymnax_truncation import TruncationInfoWrapper
+
 
 _create_fns = {
     "brax": ("nexrl.compat.brax2gymnax", "create_brax"),
@@ -23,7 +25,8 @@ _ENVS_ACCEPTING_NUM_ENVS = {"atari", "dm_control"}
 def create(env, **kwargs):
     if len(split := env.split("/", 1)) == 1:
         kwargs.pop("num_envs", None)  # gymnax.make doesn't accept num_envs
-        return _gymnax_make(env, **kwargs)
+        gymnax_env, params = _gymnax_make(env, **kwargs)
+        return TruncationInfoWrapper(gymnax_env), params
 
     prefix, env_name = split
     if prefix not in _ENVS_ACCEPTING_NUM_ENVS:

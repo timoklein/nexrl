@@ -1,4 +1,5 @@
 import jax
+import numpy as np
 import pytest
 from jax import numpy as jnp
 
@@ -82,3 +83,39 @@ def test_navix_env_params(env_name):
     obs, state = env.reset(rng, params)
     assert obs is not None
     assert state is not None
+
+
+def test_navix_truncation_info_and_final_obs():
+    """`truncated` only at the time limit; the done step returns the reset obs and `final_obs` is the pre-reset obs."""
+    max_steps = 3  # not a multiple of 4, so the rotating agent ends facing another way than at reset
+    env, params = create_navix("Navix-Empty-5x5-v0", max_steps=max_steps)
+    step = jax.jit(env.step)
+    key = jax.random.PRNGKey(0)
+    obs, state = env.reset(key, params)
+    action = jnp.asarray(0)  # rotate in place: the goal is never reached
+    for t in range(1, 2 * max_steps + 2):
+        obs, state, reward, done, info = step(key, state, action, params)
+        assert info["truncated"].dtype == jnp.bool_
+        assert info["final_obs"].shape == obs.shape and info["final_obs"].dtype == obs.dtype
+        in_episode = (t - 1) % max_steps + 1  # step index within the current episode
+        # Every step, done or not, is a real transition of the episode: no phantom step after a done.
+        assert float(reward) == 0.0
+        if in_episode < max_steps:
+            assert not bool(done) and not bool(info["truncated"])
+            assert int(state.timestep.t) == in_episode  # the action was applied
+            np.testing.assert_array_equal(info["final_obs"], obs)
+        else:
+            assert bool(done) and bool(info["truncated"])
+            assert int(state.timestep.t) == 0  # state is the fresh episode's reset state
+            assert not bool(state.timestep.step_type > 0)  # navix must not reset lazily again
+            # The agent rotated 3 times, so the final obs differs from the reset obs.
+            assert not np.array_equal(info["final_obs"], obs)
+
+
+def test_navix_termination_is_not_truncation():
+    """A physical termination on the last step of the time limit is not a truncation."""
+    env, params = create_navix("Navix-Empty-5x5-v0", max_steps=1, termination_fn=lambda *_: jnp.asarray(True))
+    key = jax.random.PRNGKey(0)
+    _obs, state = env.reset(key, params)
+    _obs, _state, _reward, done, info = env.step(key, state, jnp.asarray(0), params)
+    assert bool(done) and not bool(info["truncated"])

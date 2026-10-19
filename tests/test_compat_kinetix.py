@@ -1,4 +1,6 @@
 import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 
@@ -144,3 +146,39 @@ def test_kinetix_env_params(level_name):
     new_params = params.replace(max_timesteps=new_max_timesteps)
     assert new_params.max_timesteps == new_max_timesteps
     assert new_params.max_steps_in_episode == new_max_timesteps
+
+
+def test_kinetix_truncation_info_and_final_obs():
+    """`truncated` only at the time limit, never at a physical termination (here a NaN in the state)."""
+    max_timesteps = 3
+    try:
+        env, params = create_kinetix("s/h0_weak_thrust")
+    except Exception:
+        pytest.skip("No test level available for Kinetix")
+    params = params.replace(max_timesteps=max_timesteps)
+    step = jax.jit(env.step)
+    step_env = jax.jit(env.step_env)
+    key = jax.random.PRNGKey(0)
+    obs, state = env.reset(key, params)
+    action = jnp.zeros(env.action_space(params).shape)
+    for t in range(1, max_timesteps + 1):
+        # Raw (non-resetting) step from the same state, for comparison with the auto-reset step.
+        raw_obs, raw_state, _, _, _ = step_env(key, state, action, params)
+        obs, new_state, _reward, done, info = step(key, state, action, params)
+        assert info["truncated"].dtype == jnp.bool_
+        assert info["final_obs"].shape == obs.shape and info["final_obs"].dtype == obs.dtype
+        np.testing.assert_array_equal(info["final_obs"], raw_obs)
+        if t < max_timesteps:
+            assert not bool(done) and not bool(info["truncated"])
+            np.testing.assert_array_equal(info["final_obs"], obs)
+        else:
+            assert bool(done) and bool(info["truncated"])
+            assert not np.array_equal(info["final_obs"], obs)  # obs is the post-reset observation
+            assert float(raw_state.last_distance) == -1.0
+        state = new_state
+
+    # Physical termination (NaN state) before the time limit: done but not truncated.
+    _obs, state = env.reset(key, params)
+    state = state.replace(polygon=state.polygon.replace(position=state.polygon.position * jnp.nan))
+    _obs, _state, _reward, done, info = step(key, state, action, params)
+    assert bool(done) and not bool(info["truncated"])

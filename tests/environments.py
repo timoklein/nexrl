@@ -12,6 +12,11 @@ https://andyljones.com/posts/rl-debugging.html
 """
 
 
+def _info(obs):
+    """Every episode end in these envs is a termination: no truncation, final obs = obs."""
+    return {"truncated": jnp.array(False), "final_obs": obs}
+
+
 class TestEnvState1(PyTreeNode):
     pass
 
@@ -32,7 +37,8 @@ class TestEnv1Continuous(Environment):
         return TestEnvParams1()
 
     def step_env(self, key, state, action, params):
-        return self.get_obs(state), state, 1, self.is_terminal(state, params), {}
+        obs = self.get_obs(state)
+        return obs, state, 1, self.is_terminal(state, params), _info(obs)
 
     def reset_env(self, key, params):
         state = TestEnvState1()
@@ -70,7 +76,8 @@ class TestEnv1Discrete(Environment):
         return TestEnvParams1()
 
     def step_env(self, key, state, action, params):
-        return self.get_obs(state), state, 1, self.is_terminal(state, params), {}
+        obs = self.get_obs(state)
+        return obs, state, 1, self.is_terminal(state, params), _info(obs)
 
     def reset_env(self, key, params):
         state = TestEnvState1()
@@ -124,7 +131,7 @@ class TestEnv2Continuous(Environment):
         next_state = state.replace(obs=rand)
         next_obs = self.get_obs(state)
         reward = obs.squeeze()
-        return next_obs, next_state, reward, self.is_terminal(next_state, params), {}
+        return next_obs, next_state, reward, self.is_terminal(next_state, params), _info(next_obs)
 
     def reset_env(self, key, params):
         obs = jax.random.uniform(key, minval=-1, maxval=1, shape=(1,))
@@ -171,7 +178,7 @@ class TestEnv2Discrete(Environment):
         next_state = state.replace(obs=rand)
         next_obs = self.get_obs(state)
         reward = obs.squeeze()
-        return next_obs, next_state, reward, self.is_terminal(next_state, params), {}
+        return next_obs, next_state, reward, self.is_terminal(next_state, params), _info(next_obs)
 
     def reset_env(self, key, params):
         obs = jax.random.uniform(key, minval=-1, maxval=1, shape=(1,))
@@ -223,7 +230,8 @@ class TestEnv3Continuous(Environment):
         t = (state.t + 1) % 3
         state = state.replace(t=t)
         reward = jax.lax.select(state.t >= 2, 1, 0)
-        return self.get_obs(state), state, reward, self.is_terminal(state, params), {}
+        obs = self.get_obs(state)
+        return obs, state, reward, self.is_terminal(state, params), _info(obs)
 
     def reset_env(self, key, params):
         state = TestEnvState3()
@@ -266,7 +274,8 @@ class TestEnv3Discrete(Environment):
         t = (state.t + 1) % 3
         state = state.replace(t=t)
         reward = jax.lax.select(state.t >= 2, 1, 0)
-        return self.get_obs(state), state, reward, self.is_terminal(state, params), {}
+        obs = self.get_obs(state)
+        return obs, state, reward, self.is_terminal(state, params), _info(obs)
 
     def reset_env(self, key, params):
         state = TestEnvState3()
@@ -315,7 +324,8 @@ class TestEnv4Continuous(Environment):
 
     def step_env(self, key, state, action, params):
         reward = action.squeeze()
-        return self.get_obs(state), state, reward, self.is_terminal(state, params), {}
+        obs = self.get_obs(state)
+        return obs, state, reward, self.is_terminal(state, params), _info(obs)
 
     def reset_env(self, key, params):
         state = TestEnvState4()
@@ -356,7 +366,8 @@ class TestEnv4Discrete(Environment):
 
     def step_env(self, key, state, action, params):
         reward = action.squeeze()
-        return self.get_obs(state), state, reward, self.is_terminal(state, params), {}
+        obs = self.get_obs(state)
+        return obs, state, reward, self.is_terminal(state, params), _info(obs)
 
     def reset_env(self, key, params):
         state = TestEnvState4()
@@ -408,7 +419,9 @@ class TestEnv5Continuous(Environment):
         obs = self.get_obs(state)
         reward = -jnp.abs(action - obs).squeeze()
         state = state.replace(obs=jax.random.uniform(key, minval=-1, maxval=1, shape=(1,)))
-        return obs, state, reward, self.is_terminal(state, params), {}
+        # The terminal obs is the next state's fresh draw, independent of the obs acted on
+        next_obs = self.get_obs(state)
+        return next_obs, state, reward, self.is_terminal(state, params), _info(next_obs)
 
     def reset_env(self, key, params):
         state = TestEnvState5(obs=jax.random.uniform(key, minval=-1, maxval=1, shape=(1,)))
@@ -453,7 +466,7 @@ class TestEnv5Discrete(Environment):
         action = 2 * action - 1
         reward = -jnp.abs(action - obs).squeeze()
         state = state.replace(obs=2 * jax.random.bernoulli(key) - 1)
-        return obs, state, reward, self.is_terminal(state, params), {}
+        return obs, state, reward, self.is_terminal(state, params), _info(obs)
 
     def reset_env(self, key, params):
         state = TestEnvState5(obs=2 * jax.random.bernoulli(key) - 1)

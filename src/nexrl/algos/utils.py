@@ -58,6 +58,8 @@ class FloatObsWrapper:
     ) -> tuple[jax.Array, Any, jax.Array, jax.Array, dict[str, Any]]:
         obs, state, reward, done, info = self.env.step(key, state, action, params)
         obs = obs.astype(jnp.float32)
+        if "final_obs" in info:
+            info = {**info, "final_obs": info["final_obs"].astype(jnp.float32)}
         return obs, state, reward, done, info
 
     @partial(jax.jit, static_argnums=(0,))

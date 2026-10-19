@@ -267,10 +267,10 @@ def train_flash_sac(
             rng_steps, carry.env_state, to_env_action(action_BA), env_params
         )
 
-        # Bootstrap through time-limit truncations. Adapters that report them also report the
-        # pre-reset obs, which gymnax's autoreset overwrites; elsewhere every done is terminal.
-        truncated_B = info.get("truncated", jnp.zeros_like(done_B))
-        final_obs_BD = info.get("final_obs", next_obs_BD)
+        # Bootstrap through time-limit truncations from the pre-reset obs, which gymnax's
+        # autoreset overwrites. Every compat adapter reports both keys.
+        truncated_B = info["truncated"]
+        final_obs_BD = info["final_obs"]
         terminated_B = jnp.logical_and(done_B, jnp.logical_not(truncated_B))
 
         # Reward scale statistics: running variance of the discounted return, and its largest magnitude
