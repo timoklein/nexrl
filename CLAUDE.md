@@ -29,6 +29,7 @@ uv run python train.py flash_sac --config configs/flash_sac/playground/g1_joysti
 uv run python train.py fast_td3 --config configs/fast_td3/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py dqn --config configs/dqn/atari/breakout.yaml
 uv run python train.py drq --config configs/drq/atari/breakout.yaml
+uv run python train.py bbf --config configs/bbf/atari/breakout.yaml
 uv run python train.py ppo --config configs/ppo/atari/breakout.yaml
 uv run python train.py ppo_rnn --config configs/ppo_rnn/gymnax/cartpole.yaml
 uv run python train.py sac --config configs/sac/dm_control/cheetah_run.yaml
@@ -63,10 +64,10 @@ adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
 
 When implementing or modifying algorithms, verify correctness using benchmark environments:
 
-- **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q, SGF)
+- **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q)
 - **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, FastTD3, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
-- **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
+- **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF, SGF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
 ## Architecture
 
@@ -81,7 +82,7 @@ config = PPOConfig.from_yaml("configs/ppo/gymnax/cartpole.yaml")
 state, metrics = jax.jit(jax.vmap(train_fn, in_axes=(None, 0)), static_argnums=(0,))(config, keys)
 ```
 
-**Key modules**: `algos/` (standalone `train_*` functions), `algos/utils.py` (env creation, GAE, normalization, target updates, eval), `networks/` (Flax NNX networks, re-exported from `__init__.py`), `configs.py` (typed dataclasses + `ALGO_CONFIG_MAP`), `types.py` (shared type aliases), `buffers.py` (JAX-native `ReplayBuffer`/`CircularBuffer`), `compat/` (environment adapters).
+**Key modules**: `algos/` (standalone `train_*` functions), `algos/utils.py` (env creation, GAE, normalization, target updates, eval env/act helpers), `evaluate.py` (`evaluate` episode rollouts), `networks/` (Flax NNX networks, re-exported from `__init__.py`), `configs.py` (typed dataclasses + `ALGO_CONFIG_MAP`), `types.py` (shared type aliases), `buffers.py` (JAX-native `ReplayBuffer`/`CircularBuffer`), `compat/` (environment adapters).
 
 **NamedTuple carry**: Each algo defines a `*Carry` NamedTuple for non-module state (rng, env_state, replay buffer, normalization stats, training metrics accumulator).
 
@@ -122,7 +123,9 @@ All `train_*` return `(TrainState, Metrics)` where `Metrics = dict[str, jax.Arra
 
 Tensor variable names use uppercase dimension suffixes (e.g. `obs_BD`, `action_BA`, `q_target_CB`). Each file has a dimension key comment.
 
-**Dimension codebook:** `B` batch, `D` obs dim, `A` action dim, `H` hidden, `T` trajectory len, `C` num critics, `K` quantile samples (IQN), `E` cosine embed (IQN), `L` ICM latent, `N` atoms (distributional), `P` PPG aux buffer, `S` latent state (MuZero/MrQ zs), `X` zsa (MrQ/MRS.Q), `Q` Q-ensemble (MRS.Q), `G` RSSM deter, `Z` RSSM stoch, `I` imagination horizon, `F` CNN features, `U` critic updates per env step (FastSAC).
+**Dimension codebook:** `B` batch, `D` obs dim, `A` action dim, `H` hidden, `T` trajectory len, `C` num critics, `K` quantile samples (IQN), `E` cosine embed (IQN), `L` ICM latent, `N` atoms (distributional), `P` PPG aux buffer, `S` latent state (MuZero/MrQ zs), `X` zsa (MrQ/MRS.Q), `Q` Q-ensemble (MRS.Q), `G` RSSM deter, `Z` RSSM stoch, `I` imagination horizon, `F` CNN features, `U` critic updates per env step (FastSAC, FastTD3), `W` image width, `J` jump steps (BBF SPR), `R` repr dim (DrQ-v2), `Y` encoder output (SGF).
+
+Some files reuse a letter with another meaning (`C` channels and `H` height in CNN encoders, `T` buffer rows per env in FastSAC/FlashSAC/FastTD3, `K` unroll steps in MuZero). The file's own dimension key is authoritative.
 
 **Rules:**
 - Rename **local variables only** — never NamedTuple fields, function parameters, dict keys, or network method signatures
@@ -151,9 +154,9 @@ Pyright `basic` mode on `src/nexrl/` (excluding `compat/` and tests). Use `jax.A
 
 These are non-obvious design decisions that differ from naive implementations. Read the relevant section before modifying an algorithm.
 
-### Strided buffer sampling (MuZero, Dreamer, MrQ, MRS.Q)
+### Strided buffer sampling (MuZero, Dreamer, MrQ, MRS.Q, BBF, DrQ)
 
-`CircularBuffer.extend` interleaves transitions as `[env0_t0, env1_t0, ..., envN_t0, env0_t1, ...]`. Algorithms needing temporal sequences from the **same env** stride by `num_envs`: `index = env_id + (start_timestep + offset) * num_envs`.
+`CircularBuffer.extend` interleaves transitions as `[env0_t0, env1_t0, ..., envN_t0, env0_t1, ...]`. Algorithms needing temporal sequences from the **same env** stride by `num_envs`: `index = env_id + (start_timestep + offset) * num_envs`. BBF and DrQ get this through `ReplayBuffer.sample_nstep(..., stride)`.
 
 ### Dreamer
 
@@ -229,14 +232,14 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **No target encoder/actor** — only `critic_target` with Polyak averaging.
 - **Gradient flow**: Encoder gets gradients only through critic loss. Actor loss uses `stop_gradient` on encoder features.
 - **N-step returns**: Computed at collection time via `NStepState` ring buffer (n=3).
-- Bypasses `create_env()` — calls `create()` directly with `pixels=True, rgb=True, action_repeat=2, frame_stack=3`.
+- Bypasses `create_env()` — calls `create()` directly with `pixels=True, rgb=True` and `action_repeat`/`frame_stack` from the config (defaults 2 and 3).
 
 ### SGF
 
 - **VICReg + augmentations** instead of RSSM + KL + reconstruction. Deterministic encoder, stochasticity via image augmentations.
 - **Encoder LayerNorm on output** — critical for representation stability.
 - **Transition predictor** trains on un-augmented encoder outputs with stop_gradient. Skip connection: `next_y = y + transition_mlp(cat(y, action))`.
-- Atari-100k only (image observations required).
+- Atari-100k only: it needs image observations `(C, H, W)` and discrete actions (the action history is one-hot encoded).
 
 ### MuZero
 
@@ -253,6 +256,6 @@ Choices intentionally rejected. Do not attempt without discussion.
 | **Don't extract Trajectory/AdvantageMinibatch to utils** | V-MPO's variant differs; ~30 LOC per file preserves self-containedness |
 | **Don't use config inheritance** | Explicit field duplication keeps each config independently readable; inheritance changes dataclass field ordering |
 | **Don't extract metrics accumulation helpers** | Interleaved with carry updates; `x * 0` tracing semantics would be obscured |
-| **Keep `algos/` flat** (no subfolders) | ~20 files, manageable; subfolders obscure "every algo is a standalone peer" |
+| **Keep `algos/` flat** (no subfolders) | ~30 files, manageable; subfolders obscure "every algo is a standalone peer" |
 | **Keep dataclass configs over Hydra** | tyro two-pass CLI handles typed overrides; Hydra adds OmegaConf complexity incompatible with frozen dataclasses and JIT |
-| **Keep `utils.py` as one file** | ~355 LOC; natural split points exist at ~500 LOC but aren't warranted yet |
+| **Keep `utils.py` as one file** | ~515 LOC; natural split points exist but a split isn't warranted yet |
