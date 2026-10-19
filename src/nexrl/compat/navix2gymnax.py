@@ -40,6 +40,13 @@ class FloatObsWrapper(environment.Environment):
     ) -> tuple[chex.Array, environment.EnvState, float, bool, dict]:
         obs, state, reward, done, info = self.env.step(key, state, action, params)
         obs = obs.astype(jnp.float32)
+        # navix resets lazily (on the step AFTER a done), so on the done step obs is already the
+        # final obs. StepType.TRUNCATION is time limit without termination (termination wins).
+        info = {
+            **info,
+            "truncated": state.timestep.is_truncation(),
+            "final_obs": obs,
+        }
         return obs, state, reward, done, info
 
     @partial(jax.jit, static_argnums=(0,))

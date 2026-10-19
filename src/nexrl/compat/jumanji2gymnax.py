@@ -121,7 +121,15 @@ class Jumanji2GymnaxEnv(GymnaxEnv):
         state, obs = self.env.step(state, action)
         done = obs.step_type == StepType.LAST
         obs_obs = observation_to_dict(obs.observation)
-        return obs_obs, state, obs.reward, done, obs.extras
+        # dm_env convention (jumanji.types.termination/truncation): at StepType.LAST, discount == 0
+        # is a termination and a nonzero discount is a truncation. step() swaps in the reset obs
+        # on done, so the pre-reset obs is only available via info.
+        info = {
+            **obs.extras,
+            "truncated": jnp.logical_and(done, jnp.all(obs.discount != 0)),
+            "final_obs": obs_obs,
+        }
+        return obs_obs, state, obs.reward, done, info
 
     def reset_env(self, key, params):
         state, obs = self.env.reset(key)
@@ -187,6 +195,7 @@ class FlattenObsWrapper(GymnaxEnv):
     def step(self, key, state, action, params):
         obs, state, reward, done, info = self.env.step(key, state, action, params)
         obs = flatten_obs(obs)
+        info = {**info, "final_obs": flatten_obs(info["final_obs"])}
         return obs, state, reward, done, info
 
     @partial(jax.jit, static_argnums=(0,))

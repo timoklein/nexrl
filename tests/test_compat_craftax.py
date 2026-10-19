@@ -1,4 +1,6 @@
 import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 
@@ -76,3 +78,34 @@ def test_craftax_env_params(env_name):
     obs, state = env.reset(rng, params)
     assert obs is not None
     assert state is not None
+
+
+@pytest.mark.parametrize("env_name", CRAFTAX_SYMBOLIC_ENVS)
+def test_craftax_truncation_info_and_final_obs(env_name):
+    """`truncated` only at the time limit, never at a death. The env has no autoreset: obs is the final obs."""
+    max_timesteps = 3
+    env, params = create_craftax(env_name)
+    params = params.replace(max_steps_in_episode=max_timesteps)
+    step = jax.jit(env.step, static_argnums=(3,))
+    key = jax.random.PRNGKey(0)
+    obs, state = env.reset(key, params)
+    action = env.action_space(params).sample(key)
+    for t in range(1, max_timesteps + 1):
+        obs, state_next, _reward, done, info = step(key, state, action, params)
+        assert info["truncated"].dtype == jnp.bool_
+        assert info["final_obs"].shape == obs.shape and info["final_obs"].dtype == obs.dtype
+        np.testing.assert_array_equal(info["final_obs"], obs)
+        assert bool(done) == (t == max_timesteps)
+        assert bool(info["truncated"]) == (t == max_timesteps)
+        state = state_next
+
+    # Death before the time limit: done but not truncated.
+    _obs, state = env.reset(key, params)
+    state = state.replace(player_health=jnp.zeros_like(state.player_health))
+    _obs, _state, _reward, done, info = step(key, state, action, params)
+    assert bool(done) and not bool(info["truncated"])
+
+    # Death on the step that also hits the time limit: a termination wins.
+    state = state.replace(timestep=jnp.asarray(max_timesteps - 1, dtype=state.timestep.dtype))
+    _obs, _state, _reward, done, info = step(key, state, action, params)
+    assert bool(done) and not bool(info["truncated"])
