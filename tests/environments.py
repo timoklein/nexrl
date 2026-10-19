@@ -419,7 +419,9 @@ class TestEnv5Continuous(Environment):
         obs = self.get_obs(state)
         reward = -jnp.abs(action - obs).squeeze()
         state = state.replace(obs=jax.random.uniform(key, minval=-1, maxval=1, shape=(1,)))
-        return obs, state, reward, self.is_terminal(state, params), _info(obs)
+        # The terminal obs is the next state's fresh draw, independent of the obs acted on
+        next_obs = self.get_obs(state)
+        return next_obs, state, reward, self.is_terminal(state, params), _info(next_obs)
 
     def reset_env(self, key, params):
         state = TestEnvState5(obs=jax.random.uniform(key, minval=-1, maxval=1, shape=(1,)))
