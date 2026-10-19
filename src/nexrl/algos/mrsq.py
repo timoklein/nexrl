@@ -734,12 +734,12 @@ def train_mrsq(
         _hard_copy(value_, value_target_)
         _hard_copy(policy_, policy_target_)
 
-        # Update reward scaling
+        # Update reward scaling: r̄' ← r̄, r̄ ← mean_D|r|
         n = carry.buffer.num_entries
         abs_rewards = jnp.abs(carry.buffer.data.reward)
         valid_mask = jnp.arange(config.buffer_size) < n
         new_reward_scale = jnp.maximum(jnp.sum(abs_rewards * valid_mask) / jnp.maximum(n.astype(jnp.float32), 1.0), 1e-4)
-        carry = carry._replace(target_reward_scale=new_reward_scale, reward_scale=new_reward_scale)
+        carry = carry._replace(target_reward_scale=carry.reward_scale, reward_scale=new_reward_scale)
 
         # Burst: Ttarget iterations of encoder updates only
         def burst_body(_, state):
