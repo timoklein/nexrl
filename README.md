@@ -66,7 +66,7 @@ configs/
 ├── ppo/
 │   ├── gymnax/cartpole.yaml
 │   ├── brax/halfcheetah.yaml
-│   └── craftax/craftax.yaml
+│   └── craftax/craftax_symbolic.yaml
 ├── dreamer/
 │   ├── gymnax/cartpole.yaml
 │   └── gymnax/pendulum.yaml
@@ -110,6 +110,8 @@ uv run python train.py dreamer --config configs/dreamer/gymnax/cartpole.yaml --i
 | [DQN](src/nexrl/algos/dqn.py) | [Mnih et al., 2015](https://arxiv.org/abs/1312.5602) | x | |
 | [IQN](src/nexrl/algos/iqn.py) | [Dabney et al., 2018](https://arxiv.org/abs/1806.06923) | x | |
 | [Rainbow](src/nexrl/algos/rainbow.py) | [Hessel et al., 2018](https://arxiv.org/abs/1710.02298) | x | |
+| [BBF](src/nexrl/algos/bbf.py) | [Schwarzer et al., 2023](https://arxiv.org/abs/2305.19452) | x | |
+| [DrQ](src/nexrl/algos/drq.py) | [Kostrikov et al., 2021](https://arxiv.org/abs/2004.13649) | x | |
 | [MPO](src/nexrl/algos/mpo.py) / [continuous](src/nexrl/algos/mpo_continuous.py) | [Abdolmaleki et al., 2018](https://arxiv.org/abs/1806.06920) | x | x |
 | [DrQ-v2](src/nexrl/algos/drqv2.py) | [Yarats et al., 2022](https://arxiv.org/abs/2107.09645) | | x |
 
@@ -120,7 +122,7 @@ uv run python train.py dreamer --config configs/dreamer/gymnax/cartpole.yaml --i
 | [MrQ](src/nexrl/algos/mrq.py) | [Fujimoto et al., 2025](https://arxiv.org/abs/2412.20708) | x | x |
 | [MRS.Q](src/nexrl/algos/mrsq.py) | [Fujimoto et al., 2025](https://arxiv.org/abs/2506.01464) | x | x |
 | [Dreamer](src/nexrl/algos/dreamer.py) | [Hafner et al., 2024](https://arxiv.org/abs/2301.04104) | x | x |
-| [SGF](src/nexrl/algos/sgf.py) | [Robine et al., 2025](https://arxiv.org/abs/2502.11757) | x | x |
+| [SGF](src/nexrl/algos/sgf.py) | [Robine et al., 2025](https://arxiv.org/abs/2502.11757) | x | |
 | [MuZero](src/nexrl/algos/muzero.py) | [Schrittwieser et al., 2020](https://arxiv.org/abs/1911.08265) | x | |
 | [AlphaZero](src/nexrl/algos/alphazero.py) | [Silver et al., 2018](https://arxiv.org/abs/1712.01815) | x | |
 
@@ -136,6 +138,7 @@ Environments are specified as namespaced strings. Gymnax environments use no pre
 | [MuJoCo Playground](https://github.com/google-deepmind/mujoco_playground) | `playground/` | `playground/CheetahRun` | x |
 | [Navix](https://github.com/epignatelli/navix) | `navix/` | `navix/MiniGrid-Empty-8x8-v0` | x |
 | [Jumanji](https://github.com/instadeepai/jumanji) | `jumanji/` | `jumanji/Snake-v1` | x |
+| [Kinetix](https://github.com/FLAIROx/Kinetix) | `kinetix/` | `kinetix/l/hard_pinball` | x |
 | [Atari](https://github.com/Farama-Foundation/Arcade-Learning-Environment) | `atari/` | `atari/Breakout-v5` | |
 | [DM Control](https://github.com/google-deepmind/dm_control) | `dm_control/` | `dm_control/cheetah-run` | |
 | [Gymnasium](https://github.com/Farama-Foundation/Gymnasium) | `gymnasium/` | `gymnasium/CartPole-v1` | |

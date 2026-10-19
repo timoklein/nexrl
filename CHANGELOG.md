@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Algorithms
+
+- Off-policy: BBF, DrQ (discrete Atari-100k variant), FastSAC, FlashSAC, FastTD3
+
+### Features
+
+- Evaluation runs on dedicated env instances (`make_eval_env`) in all algorithms
+- `epsilon_eval` config field for DQN, IQN, PQN and Rainbow
+- Sample-time n-step returns (`ReplayBuffer.sample_nstep`)
+- MuJoCo Playground adapter: truncation info (`truncated`, `final_obs`) and dict-observation selection (`obs_key`)
+- CI test job split into 4 parallel shards
+
 ## [0.1.0] - 2026-04-14
 
 Initial release of nexrl, a pure-JAX RL library.
