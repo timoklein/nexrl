@@ -8,7 +8,7 @@ import numpy as np
 from flax import struct
 from gymnasium import Env as GymnasiumEnv
 from gymnasium import spaces as gymnasium_spaces
-from gymnasium.wrappers import Autoreset
+from gymnasium.wrappers import TimeLimit
 from gymnax.environments import spaces as gymnax_spaces
 from gymnax.environments.environment import Environment as GymnaxEnv
 from jax import ShapeDtypeStruct
@@ -27,8 +27,10 @@ from jax.dtypes import canonicalize_dtype
 
 
 def create_gymnasium(env_name, **kwargs):
+    # No gymnasium Autoreset wrapper: gymnax's base `step` already resets in the same step
+    # (it calls `reset_env` and selects the reset obs/state on done), and every callback
+    # loads the full env state first, so episodes end without a phantom transition.
     env = gym.make(env_name, **kwargs)
-    env = Autoreset(env)
     env = Gymnasium2GymnaxEnv(env)
     return env, env.default_params
 
@@ -46,6 +48,19 @@ STATE_ATTRIBUTES = {
 }
 
 STATE_SEED_NAME = "_nexrl_seed"
+# Step counter of gymnasium's TimeLimit wrapper. It is env state too: without it, the
+# `reset_env` call in every gymnax `step` would zero the counter and the time limit
+# would never fire.
+STATE_ELAPSED_STEPS_NAME = "_nexrl_elapsed_steps"
+
+
+def _find_time_limit(env):
+    """The TimeLimit wrapper in `env`'s wrapper chain, or None (no registered limit)."""
+    while isinstance(env, gym.Wrapper):
+        if isinstance(env, TimeLimit):
+            return env
+        env = env.env
+    return None
 
 
 def load_state(env, state):
@@ -57,6 +72,16 @@ def load_state(env, state):
     for attr in STATE_ATTRIBUTES[env.spec.id]:
         setattr(env.unwrapped, attr, state[attr])
 
+    time_limit = _find_time_limit(env)
+    if time_limit is not None:
+        time_limit._elapsed_steps = int(state[STATE_ELAPSED_STEPS_NAME])
+
+    # CartPole counts steps past a termination and then pays reward 0. One gymnasium env
+    # serves every vmap lane and the state we step from is never terminal (gymnax's
+    # `step` resets on done), so clear the counter another lane may have left behind.
+    if hasattr(env.unwrapped, "steps_beyond_terminated"):
+        env.unwrapped.steps_beyond_terminated = None
+
 
 def get_state(env):
     state = {}
@@ -64,6 +89,10 @@ def get_state(env):
 
     for attr in STATE_ATTRIBUTES[env.spec.id]:
         state[attr] = np.array(getattr(env.unwrapped, attr))
+
+    time_limit = _find_time_limit(env)
+    if time_limit is not None:
+        state[STATE_ELAPSED_STEPS_NAME] = np.array(time_limit._elapsed_steps, dtype=np.int32)
 
     return state
 
@@ -76,8 +105,11 @@ def step_gymnasium_env(env: GymnasiumEnv, state, action):
     state = get_state(env)
 
     done = term or trunc
-    info = {}
-    return obs.astype(jnp.float32), state, reward, done, info
+    obs = obs.astype(jnp.float32)
+    # gymnax's base `step` swaps in the reset obs on done, so the pre-reset obs is only
+    # available via info. "truncated" = time limit without physical termination.
+    info = {"truncated": bool(trunc and not term), "final_obs": obs}
+    return obs, state, reward, done, info
 
 
 def reset_gymnasium_env(env: GymnasiumEnv, seed: int):
@@ -168,7 +200,7 @@ class Gymnasium2GymnaxEnv(GymnaxEnv):
             return step_gymnasium_env(self.env, state, action)
 
         seed = jax.random.randint(key, (), 0, 2**16)
-        state[STATE_SEED_NAME] = seed
+        state = {**state, STATE_SEED_NAME: seed}  # copy: don't mutate the caller's state
         return jax.pure_callback(
             step,
             self.step_shape_dtype,
@@ -182,7 +214,7 @@ class Gymnasium2GymnaxEnv(GymnaxEnv):
             return reset_gymnasium_env(self.env, seed)
 
         seed = jax.random.randint(key, (), 0, 2**16)
-        return jax.pure_callback(reset, self.reset_shape_dtype, seed=seed)
+        return jax.pure_callback(reset, self.reset_shape_dtype, vmap_method="sequential", seed=seed)
 
     def get_obs(self, state):
         raise NotImplementedError
@@ -215,15 +247,21 @@ def _step_multi_instance(envs, env_idx, action, *, autoreset_in_step: bool = Fal
 
     ``autoreset_in_step`` selects the auto-reset convention:
 
-    * ``False`` (default, e.g. DMC): the env is wrapped in gymnasium ``Autoreset``, which
-      resets on the step AFTER a terminal one and discards that step's action (a two-step
-      reset).
-    * ``True`` (Atari): the env has NO ``Autoreset`` wrapper; instead we reset this instance
-      IN THE SAME STEP as a real episode end and return the reset obs as ``next_obs`` (with
-      ``done`` still True). This matches every pure-JAX gymnax env and Dopamine/BBF, and
-      avoids the phantom ``(terminal_obs, discarded_action, reward=0, reset_obs, done=False)``
-      transition that the two-step convention otherwise stores at max priority every game
+    * ``True`` (Atari, DMC): the env has NO ``Autoreset`` wrapper; instead we reset this
+      instance IN THE SAME STEP as a real episode end and return the reset obs as
+      ``next_obs`` (with ``done`` still True). This matches every pure-JAX gymnax env and
+      Dopamine/BBF, and avoids the phantom ``(terminal_obs, discarded_action, reward=0,
+      reset_obs, done=False)`` transition that gymnasium's ``Autoreset`` (a two-step reset
+      that discards the post-terminal action) otherwise stores at max priority every game
       over (it corrupts n-step/SPR windows anchored there).
+    * ``False`` (default, no factory uses it): no reset here. The env must reset itself,
+      e.g. with a gymnasium ``Autoreset`` wrapper, and then shows the phantom above.
+
+    Truncation info (same convention as every nexrl adapter): ``info['truncated']`` is
+    ``trunc and not term`` — the time limit ended the episode without a physical
+    termination — and ``info['final_obs']`` is the obs before the in-step reset (equal to
+    ``obs`` when no reset happened). Both refer to the GAME-level end: EpisodicLifeEnv
+    passes the inner ``terminated``/``truncated`` through unchanged.
 
     With EpisodicLifeEnv (terminal_on_life_loss), ``done`` is the GAME boundary (game over)
     and ``info['life_terminal']`` marks a life loss that continues the game (NO reset);
@@ -241,6 +279,8 @@ def _step_multi_instance(envs, env_idx, action, *, autoreset_in_step: bool = Fal
     done = term or trunc
     real_done = bool(info.get("real_done", done))
     life_terminal = bool(info.get("life_terminal", False))
+    truncated = bool(trunc and not term)
+    final_obs = np.asarray(obs)
     # gymnax-convention auto-reset: on a real episode end, reset this instance now and
     # return the fresh-episode reset frame as next_obs (instead of the terminal frame).
     # `done` stays True, so downstream n-step/SPR windows still cut here and mask next_obs.
@@ -254,7 +294,7 @@ def _step_multi_instance(envs, env_idx, action, *, autoreset_in_step: bool = Fal
         np.array(idx, dtype=np.int32),
         float(reward),
         done,
-        {"real_done": real_done, "life_terminal": life_terminal},
+        {"real_done": real_done, "life_terminal": life_terminal, "truncated": truncated, "final_obs": final_obs},
     )
 
 
@@ -278,9 +318,8 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         self.make_fn = make_fn
         self._num_envs = num_envs
         # gymnax-convention auto-reset inside step_env (env has no gymnasium Autoreset
-        # wrapper). Atari sets this True to avoid the phantom post-terminal transition; DMC
-        # leaves it False (keeps the gymnasium Autoreset two-step reset). See
-        # _step_multi_instance for the two conventions.
+        # wrapper). Atari and DMC set this True to avoid the phantom post-terminal
+        # transition. See _step_multi_instance for the two conventions.
         self._autoreset_in_step = autoreset_in_step
         # Explicit per-episode step cap. ALE-v5 registers no ``max_episode_steps``
         # on its spec, so without this ``default_params`` falls back to 1000 — far
@@ -302,8 +341,8 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         ``nexrl.algos.utils.make_eval_env``.
 
         Every constructor argument must be propagated, ``autoreset_in_step``
-        above all: ``create_atari``'s ``make_fn`` builds NO gymnasium
-        ``Autoreset`` wrapper (the adapter resets in-step instead), so a clone
+        above all: the ``make_fn`` of ``create_atari`` and ``create_dmc`` builds NO
+        gymnasium ``Autoreset`` wrapper (the adapter resets in-step instead), so a clone
         left at the ``False`` default would never reset — every lane would stick
         in a terminated env after its first game over and returns would collapse
         to ~0. ``_max_steps`` is forwarded raw (possibly ``None``) rather than as
@@ -350,6 +389,8 @@ class MultiInstanceGymnasium2GymnaxEnv(GymnaxEnv):
         info_sd = {
             "real_done": ShapeDtypeStruct((), jnp.bool_),
             "life_terminal": ShapeDtypeStruct((), jnp.bool_),
+            "truncated": ShapeDtypeStruct((), jnp.bool_),
+            "final_obs": obs_sd,
         }
         return obs_sd, idx_sd, reward_sd, done_sd, info_sd
 
@@ -502,14 +543,15 @@ class EpisodicLifeEnv(gym.Wrapper):
         # Life lost but game not truly over -> agent-only terminal (game continues).
         life_terminal = 0 < new_lives < self.lives
         self.lives = new_lives
-        # Pass through the GAME-OVER terminal only (so Autoreset fires only at game
-        # over); carry the per-life terminal out-of-band. No env reset on a life loss.
+        # Pass through the GAME-OVER terminal only (so the adapter's in-step reset fires
+        # only at game over); carry the per-life terminal out-of-band. No env reset on a
+        # life loss.
         info = {**info, "real_done": real_done, "life_terminal": bool(life_terminal)}
         return obs, reward, terminated, truncated, info
 
     def reset(self, *, seed=None, options=None):
-        # A life loss no longer raises a gym terminal, so the outer Autoreset only
-        # resets at a true game over: this is always a real ALE reset starting a fresh
+        # A life loss no longer raises a gym terminal, so the adapter's in-step reset only
+        # fires at a true game over: this is always a real ALE reset starting a fresh
         # game (matching the reference's _initialize_episode at game over).
         obs, info = self.env.reset(seed=seed, options=options)
         self.lives = self.env.unwrapped.ale.lives()  # type: ignore[attr-defined]
@@ -570,7 +612,11 @@ def create_atari(env_name, *, num_envs: int = 1, terminal_on_life_loss: bool = F
 
 
 class ActionRepeatWrapper(gym.Wrapper):
-    """Repeat action N times, summing rewards and breaking on termination."""
+    """Repeat action N times, summing rewards and breaking on termination or truncation.
+
+    Returns the ``terminated``/``truncated`` flags of the last inner step, so an inner
+    ``TimeLimit`` truncation reaches the adapter's ``info['truncated']`` unchanged.
+    """
 
     def __init__(self, env: gym.Env, repeat: int):
         super().__init__(env)
@@ -635,10 +681,12 @@ def create_dmc(
                 env = gym.wrappers.GrayscaleObservation(env, keep_dim=False)
                 # (84, 84) → FrameStack → (frame_stack, 84, 84) — already CHW
                 env = gym.wrappers.FrameStackObservation(env, frame_stack)
-        env = Autoreset(env)
+        # NO gymnasium Autoreset wrapper: the adapter auto-resets IN-STEP, as for Atari
+        # (see create_atari and _step_multi_instance). Autoreset's two-step reset would
+        # add a phantom (reset_obs, reward=0, done=False) transition after every episode.
         return env
 
-    wrapped = MultiInstanceGymnasium2GymnaxEnv(make_fn, num_envs)
+    wrapped = MultiInstanceGymnasium2GymnaxEnv(make_fn, num_envs, autoreset_in_step=True)
     # Adjust max_steps for action repeat
     if action_repeat > 1:
         from nexrl.compat._env_params import make_env_params
