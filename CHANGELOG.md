@@ -11,7 +11,13 @@
 - Evaluation runs on dedicated env instances (`make_eval_env`) in all algorithms
 - `epsilon_eval` config field for DQN, IQN, PQN and Rainbow
 - Sample-time n-step returns (`ReplayBuffer.sample_nstep`)
-- MuJoCo Playground adapter: truncation info (`truncated`, `final_obs`) and dict-observation selection (`obs_key`)
+- MuJoCo Playground adapter: dict-observation selection (`obs_key`)
+- All env adapters report truncation info (`info["truncated"]`, `info["final_obs"]`) and reset inside the step; FastSAC, FlashSAC and FastTD3 bootstrap through truncations on every suite
+
+### Fixes
+
+- `gymnasium/` adapter: time limits never fired (the per-step reset zeroed the step counter); vmapped reset now works
+- DMC and Navix adapters: removed the phantom transition after each episode end (two-step / lazy reset)
 - CI test job split into 4 parallel shards
 
 ## [0.1.0] - 2026-04-14

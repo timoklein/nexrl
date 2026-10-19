@@ -138,6 +138,8 @@ Some files reuse a letter with another meaning (`C` channels and `H` height in C
 
 Namespaced strings: `CartPole-v1` (gymnax), `gymnasium/CartPole-v1`, `brax/halfcheetah`, `atari/Breakout-v5`, `dm_control/cheetah-run`, `playground/CheetahRun`. Adapters in `compat/` convert to gymnax interface.
 
+**Episode ends (every adapter):** `done` means the episode ended, by termination or truncation. `info["truncated"]` is True when the time limit was hit without a physical termination. `info["final_obs"]` is the pre-reset obs (same shape and dtype as obs), which gymnax's autoreset overwrites. Every adapter resets inside the step, so no phantom post-done transition exists. Algorithms that bootstrap through truncations index both keys directly, so a custom `env=` must report them too (see `tests/environments.py`). Jumanji marks most time limits as terminations itself (only envs calling `jumanji.types.truncation` truncate). SAC, TD3, PPO, DQN etc. still treat every done as terminal.
+
 **Key gotchas:**
 - **`jax.ensure_compile_time_eval()`**: `compat/` wraps env creation in this. Third-party packages (Craftax) run `jnp` ops at import time — if first triggered inside JIT, those ops see tracers and crash.
 - **Atari/DMC** use `MultiInstanceGymnasium2GymnaxEnv` — sequential `jax.pure_callback`, no vectorization. Atari obs: `(4, 84, 84)` uint8. DMC pixels: `(3, 84, 84)` uint8.
@@ -201,7 +203,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 ### FastSAC
 
 - **Reference is RL-X `fastsac/flax_full_jit`** (default path only: n_steps=1, no clipped double-Q, no grad clipping, no LR anneal). Defaults in `FastSACConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
-- **Truncations bootstrap**: the Playground adapter puts `truncated` (time limit without physical termination) and `final_obs` (pre-reset obs, which gymnax's autoreset overwrites) in `info`. FastSAC reads them with `.get` defaults, so on envs without these keys every done is terminal, like nexrl SAC.
+- **Truncations bootstrap**: the buffer stores `terminated = done & ~info["truncated"]` and `next_obs = info["final_obs"]` (see Episode ends above). nexrl SAC instead treats every done as terminal.
 - **Each critic learns from its own target critic's projection** (no min over critics); the policy loss uses the mean of the two expected Qs.
 - **Alpha loss uses the next-state log-probs of the critic step** and is in the same gradient call as the critic loss. log_alpha has its own AdamW, weight decay included — the reference's choice, which pulls α toward 1.
 - **Polyak (τ=0.125) runs after every critic update** (8 per env step), not once per env step.
