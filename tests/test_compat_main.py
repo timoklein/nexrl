@@ -1,4 +1,6 @@
 import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from nexrl.compat import create
@@ -83,3 +85,59 @@ def test_create_invalid_environment():
     """Test that create handles invalid environment names gracefully."""
     with pytest.raises(ValueError):
         create("NonExistentEnvironment-v999")
+
+
+def _rollout_check(env, params, n_steps, action_fn, key=jax.random.PRNGKey(0)):
+    """Drive env.step; compare with the raw (non-resetting) step_env. Returns (n_trunc, n_physical)."""
+    step = jax.jit(env.step)
+    step_env = jax.jit(env.step_env)
+    key, k = jax.random.split(key)
+    obs, state = env.reset(k, params)
+    n_trunc = n_physical = 0
+    for _ in range(n_steps):
+        key, k = jax.random.split(key)
+        action = action_fn(k)
+        raw_obs, _, _, _, _ = step_env(k, state, action, params)
+        obs, new_state, _, done, info = step(k, state, action, params)
+        assert info["truncated"].dtype == jnp.bool_
+        assert info["final_obs"].shape == obs.shape and info["final_obs"].dtype == obs.dtype
+        assert "discount" in info
+        np.testing.assert_array_equal(info["final_obs"], raw_obs)
+        if bool(done):
+            assert not np.array_equal(info["final_obs"], obs)  # obs is the post-reset observation
+            if bool(info["truncated"]):
+                n_trunc += 1
+                assert int(state.time) + 1 >= params.max_steps_in_episode
+            else:
+                n_physical += 1
+        else:
+            assert not bool(info["truncated"])
+            np.testing.assert_array_equal(info["final_obs"], obs)
+        state = new_state
+    return n_trunc, n_physical
+
+
+def test_gymnax_pendulum_truncation_is_time_limit():
+    env, params = create("Pendulum-v1")
+    params = params.replace(max_steps_in_episode=5)
+    n_trunc, n_physical = _rollout_check(env, params, 12, lambda k: jnp.zeros(1))
+    assert n_trunc == 2 and n_physical == 0
+
+
+def test_gymnax_cartpole_truncation_only_at_time_limit():
+    env, params = create("CartPole-v1")
+    params = params.replace(max_steps_in_episode=15)
+    # Always pushing one way topples the pole (physical end) well before step 15 ...
+    n_trunc, n_physical = _rollout_check(env, params, 30, lambda k: jnp.int32(1))
+    assert n_physical > 0 and n_trunc == 0
+    # ... while a limit of 3 steps is always hit first (time-limit end).
+    params = params.replace(max_steps_in_episode=3)
+    n_trunc, n_physical = _rollout_check(env, params, 9, lambda k: jnp.int32(1))
+    assert n_trunc == 3 and n_physical == 0
+
+
+def test_gymnax_wrapper_delegates_attributes():
+    env, params = create("CartPole-v1")
+    assert env.name == "CartPole-v1" and env.num_actions == 2
+    assert env.obs_shape == (4,)  # delegated to the inner env
+    assert env.action_space(params).n == 2

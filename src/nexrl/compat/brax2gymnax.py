@@ -10,6 +10,9 @@ from jax import numpy as jnp
 
 
 def create_brax(env_name, **kwargs):
+    # gymnax's step() already resets on done, so brax's AutoResetWrapper is redundant. Without it,
+    # state.obs on a done step is the pre-reset obs, which is reported as info["final_obs"].
+    kwargs.setdefault("auto_reset", False)
     env = create(env_name, **kwargs)
     env = Brax2GymnaxEnv(env)
     return env, env.default_params
@@ -24,7 +27,7 @@ class EnvParams:
 class Brax2GymnaxEnv(GymnaxEnv):
     def __init__(self, env: BraxEnv):
         self.env = env
-        self.max_steps_in_episode = env.episode_length
+        self.max_steps_in_episode = getattr(env, "episode_length", None) or 1000
 
     @property
     def default_params(self):
@@ -32,7 +35,13 @@ class Brax2GymnaxEnv(GymnaxEnv):
 
     def step_env(self, key, state, action, params):
         state = self.env.step(state, action)
-        return state.obs, state, state.reward, state.done.astype(bool), state.info
+        done = state.done.astype(bool)
+        # brax's EpisodeWrapper sets info["truncation"] only when the step limit is hit without an
+        # inner done. It is absent when the env was created with episode_length=None.
+        truncated = state.info["truncation"].astype(bool) if "truncation" in state.info else jnp.zeros_like(done)
+        # New dict: the state pytree structure must stay fixed for gymnax's lax.select.
+        info = {**state.info, "truncated": truncated, "final_obs": state.obs}
+        return state.obs, state, state.reward, done, info
 
     def reset_env(self, key, params):
         state = self.env.reset(key)
