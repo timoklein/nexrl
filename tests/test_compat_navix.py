@@ -86,24 +86,30 @@ def test_navix_env_params(env_name):
 
 
 def test_navix_truncation_info_and_final_obs():
-    """`truncated` only at the time limit; navix resets lazily, so obs on the done step is the final obs."""
-    max_steps = 4
+    """`truncated` only at the time limit; the done step returns the reset obs and `final_obs` is the pre-reset obs."""
+    max_steps = 3  # not a multiple of 4, so the rotating agent ends facing another way than at reset
     env, params = create_navix("Navix-Empty-5x5-v0", max_steps=max_steps)
     step = jax.jit(env.step)
     key = jax.random.PRNGKey(0)
     obs, state = env.reset(key, params)
     action = jnp.asarray(0)  # rotate in place: the goal is never reached
-    for t in range(1, max_steps + 2):
-        obs, state, _reward, done, info = step(key, state, action, params)
+    for t in range(1, 2 * max_steps + 2):
+        obs, state, reward, done, info = step(key, state, action, params)
         assert info["truncated"].dtype == jnp.bool_
         assert info["final_obs"].shape == obs.shape and info["final_obs"].dtype == obs.dtype
-        np.testing.assert_array_equal(info["final_obs"], obs)
-        if t < max_steps:
+        in_episode = (t - 1) % max_steps + 1  # step index within the current episode
+        # Every step, done or not, is a real transition of the episode: no phantom step after a done.
+        assert float(reward) == 0.0
+        if in_episode < max_steps:
             assert not bool(done) and not bool(info["truncated"])
-        elif t == max_steps:
+            assert int(state.timestep.t) == in_episode  # the action was applied
+            np.testing.assert_array_equal(info["final_obs"], obs)
+        else:
             assert bool(done) and bool(info["truncated"])
-        else:  # the step after a done is navix's lazy reset
-            assert not bool(done) and not bool(info["truncated"])
+            assert int(state.timestep.t) == 0  # state is the fresh episode's reset state
+            assert not bool(state.timestep.step_type > 0)  # navix must not reset lazily again
+            # The agent rotated 3 times, so the final obs differs from the reset obs.
+            assert not np.array_equal(info["final_obs"], obs)
 
 
 def test_navix_termination_is_not_truncation():
