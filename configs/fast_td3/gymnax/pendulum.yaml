@@ -1,0 +1,13 @@
+# FastTD3 reference algorithm defaults; only the env-dependent settings change.
+env: Pendulum-v1
+obs_key: null
+num_envs: 128
+buffer_size_per_env: 1024  # x 128 envs = 131k transitions
+learning_starts: 10  # vectorized env steps
+batch_size: 32768
+total_timesteps: 307200
+eval_freq: 25600
+# Pendulum rewards lie in [-16.3, 0]; at gamma 0.97 returns reach about -540
+v_min: -600.0
+v_max: 0.0
+run_evaluation: true

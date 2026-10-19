@@ -1,0 +1,27 @@
+# RL-X fasttd3/flax_full_jit default_config + mujoco_playground/g1_joystick_flat_terrain (4096 envs).
+env: playground/G1JoystickFlatTerrain
+obs_key: privileged_state  # RL-X feeds the privileged state to actor and critic
+num_envs: 4096
+# Reference: 10240 rows per env = 41.9M transitions, ~78 GB for G1's 216-d obs; does not fit a 40 GB GPU
+buffer_size_per_env: 3072  # ring rows per env (12.6M transitions)
+learning_starts: 10  # vectorized env steps
+batch_size: 32768
+actor_hidden_layer_sizes: [512, 256, 128]
+critic_hidden_layer_sizes: [1024, 512, 256]
+learning_rate: 0.0003
+weight_decay: 0.1
+total_timesteps: 2000158720
+eval_freq: 18350080
+gamma: 0.97
+polyak: 0.9  # reference tau 0.1
+num_atoms: 101
+v_min: -10.0
+v_max: 10.0
+noise_std_min: 0.001
+noise_std_max: 0.4
+smoothing_noise_std: 0.001
+smoothing_noise_clip: 0.5
+num_critic_updates_per_policy_update: 2
+num_policy_updates_per_step: 1
+normalize_observations: true
+run_evaluation: false

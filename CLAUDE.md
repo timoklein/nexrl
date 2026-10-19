@@ -26,6 +26,7 @@ uv run python train.py ppo --env Pendulum-v1 --agent-kwargs.activation tanh
 uv run python train.py sac_simba --config configs/sac_simba/gymnax/pendulum.yaml
 uv run python train.py fast_sac --config configs/fast_sac/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py flash_sac --config configs/flash_sac/playground/g1_joystick_flat_terrain.yaml
+uv run python train.py fast_td3 --config configs/fast_td3/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py dqn --config configs/dqn/atari/breakout.yaml
 uv run python train.py drq --config configs/drq/atari/breakout.yaml
 uv run python train.py ppo --config configs/ppo/atari/breakout.yaml
@@ -50,6 +51,7 @@ CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/ca
 | this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | reference net (SAME/7744), eval_freq 100k (1x400-ep final eval) | ~97 eff. (17.3 min/run) | — | 3/GPU | 2026-08-21 |
 | this box (A100-PCIE-40GB) | FastSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 8192, 8 critic updates/step), 102.4M steps, no eval | ~16.1k train (~14.9k incl. 2.5 min compile) | 10.2 GB | — | 2026-10-16 |
 | this box (A100-PCIE-40GB) | FlashSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 2048, 2 critic updates/step, 10M buffer), 50M steps, no eval | ~43k train (~26k incl. ~12 min compile) | 36.1 GB (mostly the 10M-row buffer) | 1/GPU | 2026-10-16 |
+| this box (A100-PCIE-40GB) | FastTD3 playground/G1JoystickFlatTerrain | reference config except buffer 3072 rows/env (4096 envs, batch 32768, 2 critic updates/step), 102.4M steps, 8 evals of 128 eps | ~15.3k incl. eval (~13.8k incl. ~12 min compile) | 23.0 GB (buffer 4096 rows/env OOMs) | 1/GPU | 2026-10-16 |
 
 Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
 the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`
@@ -62,7 +64,7 @@ adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
 When implementing or modifying algorithms, verify correctness using benchmark environments:
 
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q, SGF)
-- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
+- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, FastTD3, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
 - **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
@@ -213,6 +215,15 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **No obs normalization** (input BatchNorm instead). Rewards are scaled at sample time by max(sqrt(var(G)+1e-8), G_max/normalized_g_max), so returns stay within +-5, the default support. Absolute Q values in tests need `normalize_rewards=False`.
 - Actions are in [-1, 1] in buffer and networks and rescaled to the env range only at the env boundary. Exploration noise is held for zeta(2)-distributed steps (<=16), with one hold count shared across envs. Actions are uniform random until `learning_starts` timesteps.
 
+### FastTD3
+
+- **Reference is RL-X `fasttd3/flax_full_jit`** (default path only: n_steps=1, clipped double-Q on, no grad clipping, no LR anneal). Defaults in `FastTD3Config` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
+- **The G1 yaml uses `buffer_size_per_env: 3072`**, not the reference 10240: 10240 x 4096 transitions of the 216-d obs is ~78 GB and does not fit a 40 GB GPU.
+- **Exploration**: per-env Gaussian noise std drawn from U[0.001, 0.4], redrawn for an env when its episode ends. The noisy policy also acts during warm-up (no uniform random actions).
+- **The buffer stores the noisy UNCLIPPED action**; the clip to [-1, 1] and the rescale to the env range happen only at the env boundary (collection and eval).
+- **Both critics train on the same target**: the projection of the target critic with the lower expected value. The policy maximizes the min over critics. The next action uses the current policy plus clipped smoothing noise (std 0.001, clip 0.5); there is no target policy.
+- **Polyak (tau=0.1) runs after every critic update** (2 per env step); truncation bootstrap and the batch-updated obs RMS work as in FastSAC.
+
 ### DrQ-v2
 
 - **No target encoder/actor** — only `critic_target` with Polyak averaging.
@@ -238,7 +249,7 @@ Choices intentionally rejected. Do not attempt without discussion.
 
 | Decision | Rationale |
 |----------|-----------|
-| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, SAC/FlashSAC, FastSAC/FlashSAC, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
+| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, SAC/FlashSAC, FastSAC/FlashSAC, FastSAC/FastTD3, TD3/FastTD3, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
 | **Don't extract Trajectory/AdvantageMinibatch to utils** | V-MPO's variant differs; ~30 LOC per file preserves self-containedness |
 | **Don't use config inheritance** | Explicit field duplication keeps each config independently readable; inheritance changes dataclass field ordering |
 | **Don't extract metrics accumulation helpers** | Interleaved with carry updates; `x * 0` tracing semantics would be obscured |
