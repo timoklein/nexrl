@@ -1,0 +1,28 @@
+# RL-X reppo/flax_full_jit default_config + mujoco_playground/g1_joystick_flat_terrain (4096 envs).
+env: playground/G1JoystickFlatTerrain
+obs_key: privileged_state  # critic and normalizer input
+policy_obs_dim: 103  # the policy sees the `state` prefix of `privileged_state`, as in RL-X
+num_envs: 4096
+num_steps: 128
+num_epochs: 4
+num_minibatches: 128
+learning_rate: 0.0003
+max_grad_norm: 0.5
+total_timesteps: 1_989_672_960  # reference 2e9 runs 115 eval periods of 33 rollouts
+eval_freq: 17_301_504  # 33 rollouts of 4096 x 128
+gamma: 0.99
+gae_lambda: 0.95
+actor_hidden_dim: 512
+critic_hidden_dim: 512
+policy_min_std: 0.0
+num_bins: 151
+v_min: -100.0
+v_max: 100.0
+init_kl_coefficient: 0.01
+kl_bound: 0.1
+init_entropy_coefficient: 0.01
+target_entropy_multiplier: 0.5
+aux_loss_coefficient: 1.0
+num_kl_samples: 16
+normalize_observations: true
+run_evaluation: true
