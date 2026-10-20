@@ -4,15 +4,15 @@
 
 ### Algorithms
 
-- Off-policy: BBF, DrQ (discrete Atari-100k variant), FastSAC, FlashSAC, FastTD3
+- Off-policy: BBF, DrQ (discrete Atari-100k variant), FastSAC, FlashSAC, FastTD3, XQC
 
 ### Features
 
 - Evaluation runs on dedicated env instances (`make_eval_env`) in all algorithms
 - `epsilon_eval` config field for DQN, IQN, PQN and Rainbow
 - Sample-time n-step returns (`ReplayBuffer.sample_nstep`)
-- MuJoCo Playground adapter: dict-observation selection (`obs_key`)
-- All env adapters report truncation info (`info["truncated"]`, `info["final_obs"]`) and reset inside the step; FastSAC, FlashSAC and FastTD3 bootstrap through truncations on every suite
+- MuJoCo Playground adapter: dict-observation selection (`obs_key`) and `action_repeat` (XQC config field, also passed to `dm_control/`)
+- All env adapters report truncation info (`info["truncated"]`, `info["final_obs"]`) and reset inside the step; FastSAC, FlashSAC, FastTD3 and XQC bootstrap through truncations on every suite
 
 ### Fixes
 

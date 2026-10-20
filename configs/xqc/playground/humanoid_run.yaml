@@ -1,0 +1,33 @@
+# RL-X xqc/flax default_config (one env, host loop in the reference) on MuJoCo Playground HumanoidRun.
+# RL-X uses DMC humanoid-run with no action repeat; the paper's DMC curves use action repeat 2.
+env: playground/HumanoidRun
+obs_key: null  # HumanoidRun obs is flat
+num_envs: 1
+buffer_size: 1000000  # transitions in total
+learning_starts: 5000  # timesteps of uniform random actions
+batch_size: 256
+updates_per_step: 2
+policy_delay: 3
+actor_learning_rate: 0.0003
+critic_learning_rate: 0.0003
+alpha_learning_rate: 0.0003
+learning_rate_end: 0.00003
+total_timesteps: 1000000
+eval_freq: 100000
+gamma: 0.99
+polyak: 0.995  # reference tau 0.005
+actor_hidden_dim: 256
+actor_num_blocks: 4
+critic_hidden_dim: 512
+critic_num_blocks: 4
+num_critics: 2
+num_atoms: 101
+v_min: -5.0
+v_max: 5.0
+log_std_min: -10.0
+log_std_max: 2.0
+initial_alpha: 0.01
+target_entropy: null  # reference "auto" = -action_dim / 2
+normalize_rewards: true
+skip_initial_evaluation: false
+run_evaluation: true

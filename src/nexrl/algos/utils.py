@@ -249,6 +249,12 @@ def create_env(
             obs_key = getattr(config, "obs_key", None)
             if obs_key is not None and config.env.startswith("playground/"):
                 extra_env_kwargs["obs_key"] = obs_key
+            # action_repeat: playground/ and dm_control/ adapters only; 1 is passed nowhere
+            action_repeat = getattr(config, "action_repeat", 1)
+            if action_repeat != 1:
+                if not config.env.startswith(("playground/", "dm_control/")):
+                    raise ValueError(f"action_repeat={action_repeat} is only supported for playground/ and dm_control/ envs.")
+                extra_env_kwargs["action_repeat"] = action_repeat
             env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1), **extra_env_kwargs)
         else:
             env = config.env

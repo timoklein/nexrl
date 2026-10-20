@@ -1,7 +1,7 @@
 """RL algorithm implementations.
 
 On-policy: ppo, ppg, ppo_icm, ppo_e3b, ppo_rnd, ppo_rnn, vmpo, vmpo_continuous
-Off-policy continuous: sac, sac_simba, fast_sac, flash_sac, td3, fast_td3, mpo_continuous
+Off-policy continuous: sac, sac_simba, fast_sac, flash_sac, xqc, td3, fast_td3, mpo_continuous
 Off-policy discrete: dqn, iqn, pqn, rainbow, mpo
 Model-based: alphazero, muzero, dreamer, sgf
 Off-policy dual-mode: mrq, mrsq
@@ -37,6 +37,7 @@ from .sgf import train_sgf
 from .td3 import train_td3
 from .vmpo import train_vmpo
 from .vmpo_continuous import train_vmpo_continuous
+from .xqc import train_xqc
 
 
 __all__ = [
@@ -69,4 +70,5 @@ __all__ = [
     "train_td3",
     "train_vmpo",
     "train_vmpo_continuous",
+    "train_xqc",
 ]

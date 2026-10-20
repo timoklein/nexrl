@@ -180,3 +180,12 @@ from nexrl.networks.world_model import (
 from nexrl.networks.world_model import (
     RepresentationNetwork as RepresentationNetwork,
 )
+from nexrl.networks.xqc import (
+    XQCCritic as XQCCritic,
+)
+from nexrl.networks.xqc import (
+    XQCPolicy as XQCPolicy,
+)
+from nexrl.networks.xqc import (
+    weight_norm as weight_norm,
+)
