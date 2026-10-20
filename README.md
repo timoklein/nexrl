@@ -96,6 +96,7 @@ uv run python train.py dreamer --config configs/dreamer/gymnax/cartpole.yaml --i
 | [PPO-E3B](src/nexrl/algos/ppo_e3b.py) | [Henaff et al., 2022](https://arxiv.org/abs/2210.05805) | x | |
 | [V-MPO](src/nexrl/algos/vmpo.py) / [continuous](src/nexrl/algos/vmpo_continuous.py) | [Song et al., 2020](https://arxiv.org/abs/1909.12238) | x | x |
 | [PQN](src/nexrl/algos/pqn.py) | [Gallici et al., 2024](https://arxiv.org/abs/2407.04811) | x | |
+| [REPPO](src/nexrl/algos/reppo.py) | [Voelcker, Brunnbauer et al., 2025](https://arxiv.org/abs/2507.11019) | | x |
 
 ### Off-policy
 
