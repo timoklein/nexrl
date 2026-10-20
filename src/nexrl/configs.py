@@ -325,6 +325,8 @@ class XQCConfig(_BaseConfig):
     # No observation normalization: the networks' input BatchNorm takes its place.
     env: str = "playground/HumanoidRun"
     obs_key: str | None = None  # dict-obs entry fed to actor and critic (Playground); HumanoidRun obs is flat
+    # Inner env steps per agent step (playground/, dm_control/). RL-X uses 1; the paper uses 2 on DMC.
+    action_repeat: int = 1
     num_envs: int = 1
     buffer_size: int = 1_000_000  # transitions in total; ring rows per env = buffer_size // num_envs
     learning_starts: int = 5_000  # timesteps of uniform random actions; updates start once exceeded

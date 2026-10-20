@@ -42,6 +42,38 @@ def test_truncation_info_and_final_obs():
         state = new_state
 
 
+def test_action_repeat():
+    inner_env = registry.load("CartpoleBalance", config_overrides={"impl": "jax"})
+    env = Playground2GymnaxEnv(inner_env, episode_length=EPISODE_LENGTH, action_repeat=2)
+    params = env.default_params
+    # 5 inner steps -> ceil(5 / 2) = 3 agent steps
+    assert params.max_steps_in_episode == 3
+    step = jax.jit(env.step)
+    inner_step = jax.jit(inner_env.step)
+
+    key = jax.random.PRNGKey(0)
+    _, state = env.reset(key, params)
+    action = 0.5 * jnp.ones(env.num_actions)
+    for t in range(1, 4):
+        # Two raw inner steps from the same state
+        ref_first = inner_step(state.inner, action)
+        ref_second = inner_step(ref_first, action)
+        key, k = jax.random.split(key)
+        _, new_state, reward, done, info = step(k, state, action, params)
+        np.testing.assert_allclose(reward, ref_first.reward + ref_second.reward, rtol=1e-6)
+        np.testing.assert_array_equal(info["final_obs"], ref_second.obs)
+        assert bool(done) == (t == 3) and bool(info["truncated"]) == (t == 3)
+        state = new_state
+
+
+def test_action_repeat_rejected_outside_playground_and_dmc():
+    from nexrl import XQCConfig
+    from nexrl.algos.utils import create_env
+
+    with pytest.raises(ValueError, match="action_repeat"):
+        create_env(XQCConfig(env="Pendulum-v1", action_repeat=2))
+
+
 @pytest.mark.slow  # G1 model load + MJX compile takes ~1 min on CPU
 def test_dict_obs_selection():
     env, params = create_playground("G1JoystickFlatTerrain", obs_key="privileged_state")

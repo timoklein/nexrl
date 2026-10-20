@@ -145,7 +145,7 @@ Namespaced strings: `CartPole-v1` (gymnax), `gymnasium/CartPole-v1`, `brax/halfc
 **Key gotchas:**
 - **`jax.ensure_compile_time_eval()`**: `compat/` wraps env creation in this. Third-party packages (Craftax) run `jnp` ops at import time — if first triggered inside JIT, those ops see tracers and crash.
 - **Atari/DMC** use `MultiInstanceGymnasium2GymnaxEnv` — sequential `jax.pure_callback`, no vectorization. Atari obs: `(4, 84, 84)` uint8. DMC pixels: `(3, 84, 84)` uint8.
-- **MuJoCo Playground** (`playground/`): JAX-native, fully jittable/vmappable. Uses `impl="jax"` (warp has CUDA issues on some GPUs). Episode truncation handled by wrapper. Vision limited (only CartpoleBalance as of 0.2.0) — use `dm_control/` for pixel training.
+- **MuJoCo Playground** (`playground/`): JAX-native, fully jittable/vmappable. Uses `impl="jax"` (warp has CUDA issues on some GPUs). Episode truncation handled by wrapper. The env config's `action_repeat` field is not read by the env (playground applies it in brax's training wrapper); pass `action_repeat=N` to `create_playground` instead, which sums rewards over N inner steps and shortens the episode to ceil(episode_length / N) agent steps. Vision limited (only CartpoleBalance as of 0.2.0) — use `dm_control/` for pixel training.
 - **Craftax** uses optimistic reset via `create_vec_env_fns()` (pre-computes `num_envs // 16` resets per step).
 
 **CNN encoders**: Set `encoder_kwargs=CNNConfig(encoder="nature"|"impala")`. Both handle NCHW→NHWC and uint8→float32/255 internally. Obs stay uint8 throughout storage — converted at forward-pass time. `FloatObsWrapper` skipped when `encoder_kwargs` is set. Each network gets its own encoder instance; Polyak updates include encoder params.
@@ -224,7 +224,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 
 ### XQC
 
-- **Reference is RL-X `xqc/flax`** (host loop, numpy buffer, 1 env). nexrl runs the same math in one jitted loop. Default path only. Defaults in `XQCConfig` = reference `default_config`. The default env is playground/HumanoidRun: RL-X uses DMC humanoid-run with no action repeat, while the paper's DMC curves use action repeat 2.
+- **Reference is RL-X `xqc/flax`** (host loop, numpy buffer, 1 env). nexrl runs the same math in one jitted loop. Default path only. Defaults in `XQCConfig` = reference `default_config`. The default env is playground/HumanoidRun: RL-X uses DMC humanoid-run with no action repeat, while the paper's DMC curves use action repeat 2. `action_repeat` (default 1, `playground/` and `dm_control/` only) sets it.
 - **Weight norm** (unit column norm of every Linear kernel, heads included) runs at init and after every actor and critic optimizer step, never on the target. Biases and BatchNorm params are untouched. Unlike FlashSAC's `project_params`, there is no eps and no norm constraint on BatchNorm.
 - **CrossQ-style BatchNorm on the critic only**: the online and target critic both run train mode on concat(s, s'). The next action uses the policy in eval mode. The policy loss runs the policy in train mode on s only, against the just-updated critic in eval mode.
 - **Update order**: critic step, then Polyak (tau 0.005, after every critic step), then the policy forward. The policy BatchNorm stats update on every update. The policy Adam step, its weight norm and the alpha step run every `policy_delay=3` updates (`update_count` is global, update 0 included).
