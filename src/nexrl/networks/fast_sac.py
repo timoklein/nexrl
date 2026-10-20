@@ -53,7 +53,11 @@ class FastSACPolicy(nnx.Module):
         hidden_layer_sizes: Sequence[int],
         log_std_range: tuple[float, float],
         rngs: nnx.Rngs,
+        *,
+        policy_obs_dim: int | None = None,
     ):
+        # in_features is the dimension AFTER slicing obs to policy_obs_dim.
+        self.policy_obs_dim = policy_obs_dim
         self.action_dim = action_dim
         self.action_range = action_range
         self.log_std_range = log_std_range
@@ -82,6 +86,9 @@ class FastSACPolicy(nnx.Module):
         return (self.action_range[1] - self.action_range[0]) / 2
 
     def _mean_log_std(self, obs: jax.Array) -> tuple[jax.Array, jax.Array]:
+        # Every forward path (__call__, act) goes through here; the policy sees obs[..., :policy_obs_dim].
+        if self.policy_obs_dim is not None:
+            obs = obs[..., : self.policy_obs_dim]
         features_BH = self.features(obs)
         mean_BA = self.action_mean(features_BH)
         log_std_BA = jnp.tanh(self.action_log_std(features_BH))

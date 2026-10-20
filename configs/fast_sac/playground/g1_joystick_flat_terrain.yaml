@@ -1,6 +1,7 @@
 # RL-X fastsac/flax_full_jit default_config + mujoco_playground/g1_joystick_flat_terrain (4096 envs).
 env: playground/G1JoystickFlatTerrain
-obs_key: privileged_state  # RL-X feeds the privileged state to actor and critic
+obs_key: privileged_state  # critic and normalizer input
+policy_obs_dim: 103  # the policy sees the `state` prefix of `privileged_state`, as in RL-X
 num_envs: 4096
 buffer_size_per_env: 1024  # ring rows per env
 learning_starts: 10  # vectorized env steps

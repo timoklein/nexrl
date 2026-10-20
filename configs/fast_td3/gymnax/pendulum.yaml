@@ -1,6 +1,7 @@
 # FastTD3 reference algorithm defaults; only the env-dependent settings change.
 env: Pendulum-v1
 obs_key: null
+policy_obs_dim: null  # flat obs, no privileged part
 num_envs: 128
 buffer_size_per_env: 1024  # x 128 envs = 131k transitions
 learning_starts: 10  # vectorized env steps
