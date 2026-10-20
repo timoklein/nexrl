@@ -114,6 +114,12 @@ from nexrl.networks.policies import (
 from nexrl.networks.policies import (
     SquashedGaussianPolicy as SquashedGaussianPolicy,
 )
+from nexrl.networks.reppo import (
+    REPPOCritic as REPPOCritic,
+)
+from nexrl.networks.reppo import (
+    REPPOPolicy as REPPOPolicy,
+)
 from nexrl.networks.rnn import (
     ActorCriticRNN as ActorCriticRNN,
 )
