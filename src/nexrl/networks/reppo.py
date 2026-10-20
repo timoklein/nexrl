@@ -158,9 +158,9 @@ class REPPOCritic(nnx.Module):
         logits_BN = self.critic_out(critic_h_BH) + 40.0 * self.zero_distribution[...]
 
         pred_h_BH = nnx.swish(self.pred_norm(self.pred_linear(activated_BH)))
-        pred_B1H = self.pred_out(pred_h_BH)  # (B, 1 + H): reward first, then next features
-        pred_features_BH = pred_B1H[..., 1:]
-        pred_reward_B1 = pred_B1H[..., :1]
+        pred = self.pred_out(pred_h_BH)  # (B, 1 + H): reward first, then next features
+        pred_features_BH = pred[..., 1:]
+        pred_reward_B1 = pred[..., :1]
         return features_BH, logits_BN, pred_features_BH, pred_reward_B1
 
     def value(self, obs: jax.Array, action: jax.Array) -> jax.Array:
