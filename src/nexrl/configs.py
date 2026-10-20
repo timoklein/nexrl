@@ -359,6 +359,39 @@ class XQCConfig(_BaseConfig):
 
 
 @dataclasses.dataclass(frozen=True)
+class REPPOConfig(_BaseConfig):
+    # Defaults: RL-X reppo/flax_full_jit default_config + its G1 env config (4096 envs).
+    env: str = "playground/G1JoystickFlatTerrain"
+    obs_key: str | None = "privileged_state"  # dict-obs entry fed to critic and normalizer; policy sees policy_obs_dim dims
+    policy_obs_dim: int | None = 103  # G1 `state` = first 103 dims of `privileged_state` (RL-X); None = full obs
+    num_envs: int = 4_096
+    num_steps: int = 128  # rollout length per env
+    num_epochs: int = 4
+    num_minibatches: int = 128
+    learning_rate: float = 3e-4  # actor and critic
+    max_grad_norm: float = 0.5
+    total_timesteps: int = 1_989_672_960  # reference 2e9 runs 115 eval periods of 33 rollouts; this matches that count
+    eval_freq: int = 17_301_504  # 33 rollouts of 4096 x 128
+    gamma: float = 0.99
+    gae_lambda: float = 0.95  # TD(lambda) of the soft value targets
+    actor_hidden_dim: int = 512
+    critic_hidden_dim: int = 512
+    policy_min_std: float = 0.0
+    num_bins: int = 151  # HL-Gauss bins of the categorical critic
+    v_min: float = -100.0
+    v_max: float = 100.0
+    init_kl_coefficient: float = 0.01
+    kl_bound: float = 0.1
+    init_entropy_coefficient: float = 0.01
+    target_entropy_multiplier: float = 0.5  # the entropy coefficient drives the entropy toward -action_dim * this
+    aux_loss_coefficient: float = 1.0  # next-feature and reward prediction loss
+    num_kl_samples: int = 16  # old-policy action samples per state for the KL estimate
+    normalize_observations: bool = True
+    skip_initial_evaluation: bool = False
+    run_evaluation: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class FastTD3Config(_BaseConfig):
     # Defaults: RL-X fasttd3/flax_full_jit default_config + its G1 env config (4096 envs).
     env: str = "playground/G1JoystickFlatTerrain"
@@ -1174,6 +1207,7 @@ ALGO_CONFIG_MAP: dict[str, type[_BaseConfig]] = {
     "fast_sac": FastSACConfig,
     "flash_sac": FlashSACConfig,
     "xqc": XQCConfig,
+    "reppo": REPPOConfig,
     "fast_td3": FastTD3Config,
     "td3": TD3Config,
     "dqn": DQNConfig,
