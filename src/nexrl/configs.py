@@ -255,7 +255,8 @@ class SACSimBaConfig(_BaseConfig):
 class FastSACConfig(_BaseConfig):
     # Defaults: RL-X fastsac/flax_full_jit default_config + its G1 env config (4096 envs).
     env: str = "playground/G1JoystickFlatTerrain"
-    obs_key: str | None = "privileged_state"  # dict-obs entry fed to actor and critic (Playground)
+    obs_key: str | None = "privileged_state"  # dict-obs entry fed to critic and normalizer; policy sees policy_obs_dim dims
+    policy_obs_dim: int | None = 103  # G1 `state` = first 103 dims of `privileged_state` (RL-X); None = full obs
     num_envs: int = 4_096
     buffer_size_per_env: int = 1_024  # ring rows per env (total = buffer_size_per_env * num_envs)
     learning_starts: int = 10  # vectorized env steps (x num_envs transitions) before the first update
@@ -289,7 +290,8 @@ class FlashSACConfig(_BaseConfig):
     # Defaults: RL-X flashsac/flax_full_jit default_config + its G1 env config (4096 envs).
     # No observation normalization: the networks' input BatchNorm takes its place.
     env: str = "playground/G1JoystickFlatTerrain"
-    obs_key: str | None = "privileged_state"  # dict-obs entry fed to actor and critic (Playground)
+    obs_key: str | None = "privileged_state"  # dict-obs entry fed to critic; policy sees policy_obs_dim dims
+    policy_obs_dim: int | None = 103  # G1 `state` = first 103 dims of `privileged_state` (RL-X); None = full obs
     num_envs: int = 4_096
     buffer_size: int = 10_000_000  # transitions in total; ring rows per env = buffer_size // num_envs
     learning_starts: int = 100_000  # timesteps of uniform random actions before the first update
@@ -395,7 +397,8 @@ class REPPOConfig(_BaseConfig):
 class FastTD3Config(_BaseConfig):
     # Defaults: RL-X fasttd3/flax_full_jit default_config + its G1 env config (4096 envs).
     env: str = "playground/G1JoystickFlatTerrain"
-    obs_key: str | None = "privileged_state"  # dict-obs entry fed to actor and critic (Playground)
+    obs_key: str | None = "privileged_state"  # dict-obs entry fed to critic and normalizer; policy sees policy_obs_dim dims
+    policy_obs_dim: int | None = 103  # G1 `state` = first 103 dims of `privileged_state` (RL-X); None = full obs
     num_envs: int = 4_096
     buffer_size_per_env: int = 10_240  # ring rows per env (total = buffer_size_per_env * num_envs)
     learning_starts: int = 10  # vectorized env steps (x num_envs transitions) before the first update

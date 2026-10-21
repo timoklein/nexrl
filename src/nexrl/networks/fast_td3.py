@@ -47,7 +47,11 @@ class FastTD3Policy(nnx.Module):
         action_dim: int,
         hidden_layer_sizes: Sequence[int],
         rngs: nnx.Rngs,
+        *,
+        policy_obs_dim: int | None = None,
     ):
+        # in_features is the dimension AFTER slicing obs to policy_obs_dim.
+        self.policy_obs_dim = policy_obs_dim
         self.features = _ReLUMLP(in_features, hidden_layer_sizes, rngs)
         self.action_mean = nnx.Linear(
             self.features.out_features,
@@ -58,6 +62,9 @@ class FastTD3Policy(nnx.Module):
         )
 
     def __call__(self, obs: jax.Array) -> jax.Array:
+        # act calls this too; the policy sees obs[..., :policy_obs_dim].
+        if self.policy_obs_dim is not None:
+            obs = obs[..., : self.policy_obs_dim]
         features_BH = self.features(obs)
         return jnp.tanh(self.action_mean(features_BH))  # (B, A) in [-1, 1]
 

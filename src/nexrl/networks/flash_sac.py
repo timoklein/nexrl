@@ -88,7 +88,11 @@ class FlashSACPolicy(nnx.Module):
         num_blocks: int,
         rngs: nnx.Rngs,
         log_std_range: tuple[float, float] = (-10.0, 2.0),
+        *,
+        policy_obs_dim: int | None = None,
     ):
+        # in_features is the dimension AFTER slicing obs to policy_obs_dim.
+        self.policy_obs_dim = policy_obs_dim
         self.log_std_range = log_std_range
         self.trunk = _Trunk(in_features, hidden_dim, num_blocks, rngs)
         self.mean_head = nnx.Linear(
@@ -107,6 +111,10 @@ class FlashSACPolicy(nnx.Module):
         )
 
     def _mean_std(self, obs: jax.Array, train: bool) -> tuple[jax.Array, jax.Array]:
+        # Every forward path (__call__, act_with_noise, act) goes through here. The slice comes before
+        # the input BatchNorm, so it normalizes only obs[..., :policy_obs_dim] (as in RL-X).
+        if self.policy_obs_dim is not None:
+            obs = obs[..., : self.policy_obs_dim]
         features_BH = self.trunk(obs, train)
         mean_BA = self.mean_head(features_BH)
         raw_log_std_BA = self.log_std_head(features_BH)

@@ -166,6 +166,13 @@ def train_flash_sac(
         # Policy actions live in [-1, 1]; the env sees them mapped to [low, high]
         return action_low + 0.5 * (jnp.clip(action, -1.0, 1.0) + 1.0) * (action_high - action_low)
 
+    if config.policy_obs_dim is not None and config.policy_obs_dim >= in_features:
+        raise ValueError(
+            f"policy_obs_dim={config.policy_obs_dim} must be smaller than the observation dimension {in_features}. "
+            "Set policy_obs_dim=None for envs without a privileged observation."
+        )
+    policy_in_features = in_features if config.policy_obs_dim is None else config.policy_obs_dim
+
     vmap_step, vmap_reset = create_vec_env_fns(env, config)
 
     # One cosine decay for all three optimizers; each counts its own steps, so the policy and
@@ -178,11 +185,12 @@ def train_flash_sac(
     # Create networks, projected to unit norm before the first step
     rngs = nnx.Rngs(rng)
     actor = FlashSACPolicy(
-        in_features=in_features,
+        in_features=policy_in_features,
         action_dim=action_dim,
         hidden_dim=config.actor_hidden_dim,
         num_blocks=config.actor_num_blocks,
         rngs=rngs,
+        policy_obs_dim=config.policy_obs_dim,
     )
     project_params(actor)
     actor_optimizer = nnx.Optimizer(actor, optax.adam(lr_schedule), wrt=nnx.Param)

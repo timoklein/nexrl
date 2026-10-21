@@ -17,6 +17,7 @@ from .environments import (
 ARGS = {
     "env": "Pendulum-v1",  # overridden by the env= argument
     "obs_key": None,
+    "policy_obs_dim": None,
     "num_envs": 4,
     "buffer_size_per_env": 2048,
     "batch_size": 128,

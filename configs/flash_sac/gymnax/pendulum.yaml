@@ -2,6 +2,7 @@
 # Reward scaling keeps returns within +-normalized_g_max, so the default [-5, 5] support fits.
 env: Pendulum-v1
 obs_key: null
+policy_obs_dim: null  # flat obs, no privileged part
 num_envs: 16
 buffer_size: 1000000
 learning_starts: 10000  # timesteps of uniform random actions

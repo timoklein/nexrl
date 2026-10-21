@@ -207,6 +207,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 ### FastSAC
 
 - **Reference is RL-X `fastsac/flax_full_jit`** (default path only: n_steps=1, no clipped double-Q, no grad clipping, no LR anneal). Defaults in `FastSACConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
+- **Asymmetric observations**: the policy sees `obs[..., :policy_obs_dim]` (103 on G1, the `state` prefix of `privileged_state`), as in RL-X. The critic and the obs normalizer see the full obs; the policy slices the normalized obs. Envs without a privileged part need `policy_obs_dim: null`; `train_fast_sac` raises if it is >= the obs dim.
 - **Truncations bootstrap**: the buffer stores `terminated = done & ~info["truncated"]` and `next_obs = info["final_obs"]` (see Episode ends above). nexrl SAC instead treats every done as terminal.
 - **Each critic learns from its own target critic's projection** (no min over critics); the policy loss uses the mean of the two expected Qs.
 - **Alpha loss uses the next-state log-probs of the critic step** and is in the same gradient call as the critic loss. log_alpha has its own AdamW, weight decay included — the reference's choice, which pulls α toward 1.
@@ -217,6 +218,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 ### FlashSAC
 
 - **Reference is RL-X `flashsac/flax_full_jit`** (default path only: n_steps=1, no LR warmup). Defaults in `FlashSACConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`). `total_timesteps` is rounded up to a multiple of 4096.
+- **Asymmetric observations**: the policy sees `obs[..., :policy_obs_dim]` (103 on G1, the `state` prefix of `privileged_state`), as in RL-X. The slice comes before the policy's input BatchNorm. The critic sees the full obs. Envs without a privileged part need `policy_obs_dim: null`; `train_flash_sac` raises if it is >= the obs dim. On G1 the slice delays learning to stay upright (eval length at 18.8M: 116-216 sliced vs 492-570 full obs, 3 seeds), and the gap closes by ~50M. Policy probes with the clean copies of the 103 dims, or with the quantities `state` lacks, each recover part of it: the cost of the noisy deployable obs, not a bug (`logs/2026-10-21_flashsac_slice/`).
 - **`project_params` runs after EVERY actor and critic optimizer step and at init, never on the target.** The target gets Polyak only. Kernels get unit column norm, RMSNorm scales and BatchNorm concat(scale, bias) get norm sqrt(d).
 - **CrossQ-style BatchNorm**: the policy loss runs a train-mode forward on concat(s, s'). The critic loss does the same for both the online and the target critic. The target BN stats update from its own forward, so the target is a module ARGUMENT to the loss, not a closure.
 - **BN mode per call site**: collection, eval, next-action sampling and the critic inside the policy loss use running averages (`train=False`). Only the forwards above use batch statistics.
@@ -250,6 +252,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 ### FastTD3
 
 - **Reference is RL-X `fasttd3/flax_full_jit`** (default path only: n_steps=1, clipped double-Q on, no grad clipping, no LR anneal). Defaults in `FastTD3Config` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
+- **Asymmetric observations** as in FastSAC: the policy sees `obs[..., :policy_obs_dim]` of the normalized obs (103 on G1), the critic and the obs normalizer the full obs.
 - **The G1 yaml uses `buffer_size_per_env: 3072`**, not the reference 10240: 10240 x 4096 transitions of the 216-d obs is ~78 GB and does not fit a 40 GB GPU.
 - **Exploration**: per-env Gaussian noise std drawn from U[0.001, 0.4], redrawn for an env when its episode ends. The noisy policy also acts during warm-up (no uniform random actions).
 - **The buffer stores the noisy UNCLIPPED action**; the clip to [-1, 1] and the rescale to the env range happen only at the env boundary (collection and eval).

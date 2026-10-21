@@ -132,6 +132,13 @@ def train_fast_td3(
     max_steps = env_params.max_steps_in_episode
     num_critic_updates = config.num_critic_updates_per_policy_update * config.num_policy_updates_per_step
 
+    if config.policy_obs_dim is not None and config.policy_obs_dim >= in_features:
+        raise ValueError(
+            f"policy_obs_dim={config.policy_obs_dim} must be smaller than the observation dimension {in_features}. "
+            "Set policy_obs_dim=None for envs without a privileged observation."
+        )
+    policy_in_features = in_features if config.policy_obs_dim is None else config.policy_obs_dim
+
     vmap_step, vmap_reset = create_vec_env_fns(env, config)
 
     def to_env_action(action):
@@ -144,10 +151,11 @@ def train_fast_td3(
     # Create networks
     rngs = nnx.Rngs(rng)
     actor = FastTD3Policy(
-        in_features=in_features,
+        in_features=policy_in_features,
         action_dim=action_dim,
         hidden_layer_sizes=config.actor_hidden_layer_sizes,
         rngs=rngs,
+        policy_obs_dim=config.policy_obs_dim,
     )
     actor_optimizer = nnx.Optimizer(actor, optax.adamw(config.learning_rate, weight_decay=config.weight_decay), wrt=nnx.Param)
     critic = FastTD3Critic(
