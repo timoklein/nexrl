@@ -12,6 +12,7 @@
 - `epsilon_eval` config field for DQN, IQN, PQN and Rainbow
 - Sample-time n-step returns (`ReplayBuffer.sample_nstep`)
 - MuJoCo Playground adapter: dict-observation selection (`obs_key`) and `action_repeat` (XQC config field, also passed to `dm_control/`)
+- `policy_obs_dim` config field (REPPO, FastSAC, FlashSAC, FastTD3): the policy sees only the first `policy_obs_dim` obs dims, the critic the full obs
 - All env adapters report truncation info (`info["truncated"]`, `info["final_obs"]`) and reset inside the step; FastSAC, FlashSAC, FastTD3 and XQC bootstrap through truncations on every suite
 
 ### Fixes
