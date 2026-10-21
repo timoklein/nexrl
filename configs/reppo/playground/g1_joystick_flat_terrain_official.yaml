@@ -1,0 +1,30 @@
+# Official REPPO G1 settings (reppo-rl/reppo config/, mjx_humanoid small_data), not RL-X's.
+# G1 deterministic eval ~31 at 52M steps (3 seeds) vs ~18 at 104M with the RL-X yaml.
+# Not reachable by config: the official actor has 3 hidden layers (ours and RL-X's: 2).
+env: playground/G1JoystickFlatTerrain
+obs_key: privileged_state  # critic and normalizer input
+policy_obs_dim: 103  # official asymmetric_obs: true
+num_envs: 1024
+num_steps: 32
+num_epochs: 8
+num_minibatches: 4
+learning_rate: 0.0003
+max_grad_norm: 0.5
+total_timesteps: 52_428_800  # 1600 rollouts of 1024 x 32
+eval_freq: 10_485_760  # 320 rollouts
+gamma: 0.97
+gae_lambda: 0.95
+actor_hidden_dim: 512
+critic_hidden_dim: 1024
+policy_min_std: 0.0
+num_bins: 151
+v_min: -10.0
+v_max: 10.0
+init_kl_coefficient: 0.01
+kl_bound: 0.1
+init_entropy_coefficient: 0.01
+target_entropy_multiplier: 0.5
+aux_loss_coefficient: 1.0
+num_kl_samples: 16
+normalize_observations: true
+run_evaluation: true

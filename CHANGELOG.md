@@ -4,6 +4,7 @@
 
 ### Algorithms
 
+- On-policy: REPPO
 - Off-policy: BBF, DrQ (discrete Atari-100k variant), FastSAC, FlashSAC, FastTD3, XQC
 
 ### Features

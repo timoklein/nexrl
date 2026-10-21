@@ -1,0 +1,10 @@
+# RL-X reppo/flax_full_jit default_config; only the scale knobs are set for Pendulum.
+env: Pendulum-v1
+obs_key: null
+policy_obs_dim: null  # flat obs, no privileged part
+num_envs: 64
+num_steps: 32
+num_minibatches: 16
+total_timesteps: 1_048_576
+eval_freq: 81_920  # 40 rollouts
+run_evaluation: true

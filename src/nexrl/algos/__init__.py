@@ -1,6 +1,6 @@
 """RL algorithm implementations.
 
-On-policy: ppo, ppg, ppo_icm, ppo_e3b, ppo_rnd, ppo_rnn, vmpo, vmpo_continuous
+On-policy: ppo, ppg, ppo_icm, ppo_e3b, ppo_rnd, ppo_rnn, vmpo, vmpo_continuous, reppo
 Off-policy continuous: sac, sac_simba, fast_sac, flash_sac, xqc, td3, fast_td3, mpo_continuous
 Off-policy discrete: dqn, iqn, pqn, rainbow, mpo
 Model-based: alphazero, muzero, dreamer, sgf
@@ -31,6 +31,7 @@ from .ppo_rnd import train_ppo_rnd
 from .ppo_rnn import train_ppo_rnn
 from .pqn import train_pqn
 from .rainbow import train_rainbow
+from .reppo import train_reppo
 from .sac import train_sac
 from .sac_simba import train_sac_simba
 from .sgf import train_sgf
@@ -64,6 +65,7 @@ __all__ = [
     "train_ppo_rnn",
     "train_pqn",
     "train_rainbow",
+    "train_reppo",
     "train_sac",
     "train_sac_simba",
     "train_sgf",

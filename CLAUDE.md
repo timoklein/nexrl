@@ -28,6 +28,7 @@ uv run python train.py fast_sac --config configs/fast_sac/playground/g1_joystick
 uv run python train.py flash_sac --config configs/flash_sac/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py fast_td3 --config configs/fast_td3/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py xqc --config configs/xqc/playground/humanoid_run.yaml
+uv run python train.py reppo --config configs/reppo/playground/g1_joystick_flat_terrain.yaml
 uv run python train.py dqn --config configs/dqn/atari/breakout.yaml
 uv run python train.py drq --config configs/drq/atari/breakout.yaml
 uv run python train.py bbf --config configs/bbf/atari/breakout.yaml
@@ -55,6 +56,7 @@ CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/ca
 | this box (A100-PCIE-40GB) | FlashSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 2048, 2 critic updates/step, 10M buffer), 50M steps, no eval | ~43k train (~26k incl. ~12 min compile) | 36.1 GB (mostly the 10M-row buffer) | 1/GPU | 2026-10-16 |
 | this box (A100-PCIE-40GB) | FastTD3 playground/G1JoystickFlatTerrain | reference config except buffer 3072 rows/env (4096 envs, batch 32768, 2 critic updates/step), 102.4M steps, 8 evals of 128 eps | ~15.3k incl. eval (~13.8k incl. ~12 min compile) | 23.0 GB (buffer 4096 rows/env OOMs) | 1/GPU | 2026-10-16 |
 | this box (A100-PCIE-40GB) | XQC playground/HumanoidRun | reference config (1 env, batch 256, 2 critic updates/step), 1M steps, 3 vmapped seeds, 10 evals of 128 eps | ~190 total over 3 seeds (~63 per seed), incl. eval and compile (4.4 h) | ~3.7 GB (nvidia-smi sample at 100k, preallocation off) | 3 seeds vmapped on 1 GPU | 2026-10-19 |
+| this box (A100-PCIE-40GB) | REPPO playground/G1JoystickFlatTerrain | reference config (4096 envs, 128-step rollouts, 4 epochs x 128 minibatches), 103.8M steps, 3 vmapped seeds, 7 evals of 128 eps | ~47k total over 3 seeds (~15.6k per seed), incl. eval and ~10 min compile (1.85 h) | ~30.9 GB for 3 seeds (nvidia-smi sample, preallocation off) | 3 seeds vmapped on 1 GPU | 2026-10-20 |
 
 Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
 the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`
@@ -67,7 +69,7 @@ adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
 When implementing or modifying algorithms, verify correctness using benchmark environments:
 
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q)
-- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, FastTD3, XQC, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
+- **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, FastTD3, XQC, REPPO, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
 - **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF, SGF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
 
@@ -234,6 +236,17 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **Eval is off by default** (the reference's `evaluation_frequency = -1`). The yamls turn it on.
 - **Truncation bootstrap** as in FastSAC (`info["truncated"]`, `info["final_obs"]`).
 
+### REPPO
+
+- **Reference is RL-X `reppo/flax_full_jit`** (default path only: no LR anneal). Defaults in `REPPOConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, 128-step rollouts, `obs_key: privileged_state`).
+- **`g1_joystick_flat_terrain_official.yaml`** holds the official REPPO repo's G1 settings (1024 envs, 32-step rollouts, 8 epochs x 4 minibatches, gamma 0.97, critic 1024, bins on +-10). They learn much faster on G1: eval ~31 at 52M steps vs ~18 at 104M with the RL-X yaml (`logs/2026-10-20_reppo_official/`). The official actor has 3 hidden layers, which no config reaches.
+- **Asymmetric observations**: the policy sees `obs[..., :policy_obs_dim]` (103 on G1, the `state` prefix of `privileged_state`), the critic and the obs normalizer the full obs. Envs without a privileged part need `policy_obs_dim: null`; `train_reppo` raises if it is >= the obs dim.
+- **On-policy with a Q critic**: each rollout stores soft rewards r - gamma * alpha * log pi(a'|s') (also on terminal steps, as in the reference) and the critic's value and features at (final_obs, a'), all computed at collection time. TD(lambda) targets are built once per rollout (`_td_lambda_targets`); truncated steps bootstrap from the next-state value alone.
+- **Critic**: HL-Gauss (151 bins on +-100, sigma 0.75 bin widths) plus an auxiliary head predicting the next features and the reward. Truncated steps are masked out of the critic loss, truncated and terminal steps out of the aux loss. No target network.
+- **Policy**: pathwise gradient through the just-updated critic. Per state, the loss switches to sg(beta) * KL once the 16-sample KL to the pre-rollout policy exceeds `kl_bound`. The entropy and KL coefficients are `nnx.Param`s of the policy, so the policy optimizer (global-norm clip 0.5) trains them.
+- **The KL estimate is not 0 at identical params**: saturated tanh samples get a different log-prob after clip + atanh. The reference formulas give the same self-KL (`logs/2026-10-20_reppo/kl_selfcheck.py`).
+- **Obs RMS** is updated from the raw obs at every rollout step before acting; the stored obs and the final obs are normalized with the updated stats.
+
 ### FastTD3
 
 - **Reference is RL-X `fasttd3/flax_full_jit`** (default path only: n_steps=1, clipped double-Q on, no grad clipping, no LR anneal). Defaults in `FastTD3Config` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
@@ -268,7 +281,7 @@ Choices intentionally rejected. Do not attempt without discussion.
 
 | Decision | Rationale |
 |----------|-----------|
-| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, SAC/FlashSAC, SAC/XQC, FastSAC/FlashSAC, FlashSAC/XQC, FastSAC/FastTD3, TD3/FastTD3, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
+| **Don't unify algorithm pairs** (SAC/SimBa, SAC/FastSAC, SAC/FlashSAC, SAC/XQC, PPO/REPPO, SAC/REPPO, FastSAC/FlashSAC, FlashSAC/XQC, FastSAC/FastTD3, TD3/FastTD3, MPO/MPO-cont, AlphaZero/MuZero, Dreamer/MuZero, MrQ/TD3, MrQ/MRS.Q, SGF/Dreamer, DrQ-v2/TD3, PPO/PPO-RNN) | Each algo is standalone — architecture, loss, optimizer structure, and training flow differ fundamentally. Shared code would obscure algorithmic differences behind conditionals |
 | **Don't extract Trajectory/AdvantageMinibatch to utils** | V-MPO's variant differs; ~30 LOC per file preserves self-containedness |
 | **Don't use config inheritance** | Explicit field duplication keeps each config independently readable; inheritance changes dataclass field ordering |
 | **Don't extract metrics accumulation helpers** | Interleaved with carry updates; `x * 0` tracing semantics would be obscured |
