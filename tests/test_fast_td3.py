@@ -1,8 +1,14 @@
+import dataclasses
+
 import jax
+import numpy as np
 import pytest
+from flax import nnx
 from jax import numpy as jnp
 
 from nexrl import FastTD3Config, train_fast_td3
+from nexrl.algos.fast_td3 import NStepTransition, make_fast_td3_networks, nstep_transitions
+from nexrl.buffers import CircularBuffer
 
 from .environments import (
     TestEnv1Continuous,
@@ -91,9 +97,7 @@ def test_env2():
 # the tests below evaluate it on a batch (the eval action is deterministic, rng unused).
 
 
-def test_env3():
-    env = TestEnv3Continuous()
-    state, _ = _train(env)
+def _check_env3(state, env):
     act = _make_act(state, env)
     q_fn = _q_fn(state)
     gamma = FastTD3Config(**ARGS).gamma
@@ -105,6 +109,115 @@ def test_env3():
         actions = jnp.expand_dims(jax.vmap(act)(obs_B1, rngs), 1)
         for v in q_fn(obs_B1, actions):
             assert v == pytest.approx(r, abs=0.1)
+
+
+def test_env3():
+    env = TestEnv3Continuous()
+    state, _ = _train(env)
+    _check_env3(state, env)
+
+
+def test_env3_nstep():
+    # 3-step windows stop at the terminal second step, so the values are those of one-step TD
+    env = TestEnv3Continuous()
+    state, _ = train_fast_td3(FastTD3Config(**{**ARGS, "n_step": 3}), jax.random.PRNGKey(0), env=env)
+    _check_env3(state, env)
+
+
+def test_nstep_transitions_windows():
+    # Ring of 6 rows, 1 env, n_step 3, gamma 0.5. Row t has reward 2^t, next obs 100 + t.
+    size = 6
+
+    def buffer(*, index, full, terminated=(), truncated=()):
+        rows_T1 = jnp.arange(size, dtype=jnp.float32)[:, None]
+
+        def flags(rows):
+            return jnp.zeros((size, 1), dtype=jnp.float32).at[jnp.array(rows, dtype=jnp.int32), 0].set(1.0)
+
+        data = NStepTransition(
+            obs=rows_T1[..., None],
+            action=rows_T1[..., None],
+            reward=2.0**rows_T1,
+            terminated=flags(terminated),
+            truncated=flags(truncated),
+            next_obs=100.0 + rows_T1[..., None],
+        )
+        return CircularBuffer(size=size, data=data, index=index, full=full)
+
+    def window(buf, start):
+        batch = nstep_transitions(buf, jnp.array([start]), jnp.array([0]), n_step=3, gamma=0.5)
+        return float(batch.reward[0]), float(batch.discount[0]), float(batch.terminated[0]), float(batch.next_obs[0, 0])
+
+    # (n-step reward, discount, terminated flag of the last row, next obs of the last row)
+    # Rows 0-4 written: a whole window, rows 0-2
+    assert window(buffer(index=5, full=False), 0) == (1 + 0.5 * 2 + 0.25 * 4, 0.125, 0.0, 102.0)
+    # Termination at row 1 ends the window; the critic drops the bootstrap
+    assert window(buffer(index=5, full=False, terminated=[1]), 0) == (1 + 0.5 * 2, 0.25, 1.0, 101.0)
+    # A time limit at row 1 ends the window and bootstraps from row 1's final obs
+    assert window(buffer(index=5, full=False, truncated=[1]), 0) == (1 + 0.5 * 2, 0.25, 0.0, 101.0)
+    # Termination in the first row
+    assert window(buffer(index=5, full=False, terminated=[2]), 2) == (4.0, 0.5, 1.0, 102.0)
+    # Full ring with newest row 1: the window stops there, before the oldest row 2
+    assert window(buffer(index=2, full=True), 0) == (1 + 0.5 * 2, 0.25, 0.0, 101.0)
+    # A window that starts at the newest row is a one-step transition
+    assert window(buffer(index=2, full=True), 1) == (2.0, 0.5, 0.0, 101.0)
+    # A window wraps around the end of the ring: rows 4, 5, 0
+    assert window(buffer(index=2, full=True), 4) == (16 + 0.5 * 32 + 0.25 * 1, 0.125, 0.0, 100.0)
+
+
+def test_invalid_configs_raise():
+    env = TestEnv1Continuous()
+    with pytest.raises(ValueError, match="n_step"):
+        train_fast_td3(FastTD3Config(**{**ARGS, "n_step": 0}), jax.random.PRNGKey(0), env=env)
+    with pytest.raises(ValueError, match="buffer_size_per_env"):
+        train_fast_td3(FastTD3Config(**{**ARGS, "n_step": 3, "buffer_size_per_env": 2}), jax.random.PRNGKey(0), env=env)
+    with pytest.raises(ValueError, match="learning_starts"):
+        train_fast_td3(FastTD3Config(**{**ARGS, "n_step": 3, "learning_starts": 2}), jax.random.PRNGKey(0), env=env)
+    with pytest.raises(ValueError, match="run_evaluation"):
+        train_fast_td3(FastTD3Config(**ARGS), jax.random.PRNGKey(0), env=env, eval_fn=lambda **kwargs: {})
+
+
+def test_make_networks_hook():
+    calls = []
+
+    def make_networks(**kwargs):
+        calls.append(kwargs)
+        config = dataclasses.replace(kwargs["config"], actor_hidden_layer_sizes=(8,))
+        return make_fast_td3_networks(**{**kwargs, "config": config})
+
+    config = FastTD3Config(**{**ARGS, "total_timesteps": 1024, "eval_freq": 1024})
+    state, metrics = train_fast_td3(config, jax.random.PRNGKey(0), env=TestEnv1Continuous(), make_networks=make_networks)
+
+    assert sorted(calls[0]) == ["action_dim", "config", "in_features", "num_critics", "policy_in_features", "rngs"]
+    assert (calls[0]["policy_in_features"], calls[0]["in_features"], calls[0]["action_dim"], calls[0]["num_critics"]) == (
+        1,
+        1,
+        1,
+        2,
+    )
+    kernel_shapes = sorted(x.shape for x in jax.tree.leaves(nnx.state(state["actor"], nnx.Param)) if x.ndim == 2)
+    assert kernel_shapes == [(1, 8), (8, 1)]
+    assert np.isfinite(metrics["critic_loss"]).all() and (metrics["critic_loss"] != 0).all()
+
+
+def test_eval_fn_hook_keeps_training_keys():
+    def eval_fn(*, act_fn, actor, critic, obs_rms, rng):
+        actions = jax.vmap(act_fn)(jnp.zeros((3, 1)), jax.random.split(rng, 3))
+        return {"hook/action": actions.mean(), "hook/key": jax.random.uniform(rng)}
+
+    config = FastTD3Config(
+        **{**ARGS, "total_timesteps": 2048, "eval_freq": 1024, "run_evaluation": True, "skip_initial_evaluation": False}
+    )
+    env = TestEnv1Continuous()
+    _, plain = train_fast_td3(config, jax.random.PRNGKey(0), env=env)
+    _, hooked = train_fast_td3(config, jax.random.PRNGKey(0), env=env, eval_fn=eval_fn)
+
+    assert set(hooked) == set(plain) | {"hook/action", "hook/key"}
+    # The initial evaluation and 2 evaluation points, each with a fresh key
+    assert len(set(np.asarray(hooked["hook/key"]).tolist())) == 3
+    # The hook draws no training keys: every built-in metric matches the run without it
+    for k in plain:
+        np.testing.assert_allclose(hooked[k], plain[k], rtol=1e-5, atol=1e-6)
 
 
 def test_env4():

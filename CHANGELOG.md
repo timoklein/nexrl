@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- FastTD3: `n_step` config field (default 1) for n-step returns built at sample time, as the official FastTD3 `num_steps`; windows stop at terminations, truncations and the newest row of the buffer
+- FastTD3 and FastSAC: optional `make_networks` (custom actor and critic through the unchanged training loop) and `eval_fn` (extra evaluation merged into the metrics) arguments
+- MuJoCo Playground adapter: `cached_reset` option (FastTD3 config field, default off) that restarts finished episodes from each env's first state, as Playground's training wrapper and the official FastTD3 do
+- `configs/fast_td3/playground/cheetah_run.yaml` with the official FastTD3 CheetahRun hyperparameters
+
 ## [1.0.0] - 2026-11-17
 
 ### Algorithms

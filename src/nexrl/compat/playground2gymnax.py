@@ -1,6 +1,7 @@
 import warnings
 from collections.abc import Mapping
 from copy import copy
+from functools import partial
 from typing import Any
 
 import jax
@@ -11,7 +12,15 @@ from jax import numpy as jnp
 from mujoco_playground import registry
 
 
-def create_playground(env_name, *, impl="jax", obs_key: str | None = None, action_repeat: int = 1, **kwargs):
+def create_playground(
+    env_name,
+    *,
+    impl="jax",
+    obs_key: str | None = None,
+    action_repeat: int = 1,
+    cached_reset: bool = False,
+    **kwargs,
+):
     """Create a MuJoCo Playground env wrapped in the gymnax interface.
 
     Args:
@@ -24,13 +33,17 @@ def create_playground(env_name, *, impl="jax", obs_key: str | None = None, actio
             EpisodeWrapper, which playground's own training wrapper applies). The
             env config's action_repeat field is not read by the env itself, so this
             is not forwarded to config_overrides.
+        cached_reset: Reset a finished episode to the env's first state instead of
+            calling the env's reset (see Playground2GymnaxEnvCachedReset). Not
+            forwarded to config_overrides.
         **kwargs: Passed as config_overrides to the playground registry.
     """
     overrides = {"impl": impl, **kwargs} if kwargs else {"impl": impl}
     env = registry.load(env_name, config_overrides=overrides)
     config = registry.get_default_config(env_name)
     episode_length = int(config.episode_length)
-    wrapped = Playground2GymnaxEnv(env, episode_length, obs_key=obs_key, action_repeat=action_repeat)
+    env_cls = Playground2GymnaxEnvCachedReset if cached_reset else Playground2GymnaxEnv
+    wrapped = env_cls(env, episode_length, obs_key=obs_key, action_repeat=action_repeat)
     return wrapped, wrapped.default_params
 
 
@@ -154,3 +167,52 @@ class Playground2GymnaxEnv(GymnaxEnv):
             stacklevel=2,
         )
         return copy(self)
+
+
+@struct.dataclass
+class PlaygroundFirstState(PlaygroundState):
+    """PlaygroundState plus the data and observation of the env's first reset."""
+
+    first_data: Any = None  # mjx.Data after the first reset
+    first_obs: Any = None  # observation after the first reset (dict or array, before obs_key selection)
+
+
+class Playground2GymnaxEnvCachedReset(Playground2GymnaxEnv):
+    """Resets a finished episode to the env's first state instead of calling the env's reset.
+
+    As playground's BraxAutoResetWrapper with full_reset=False, the default of its training
+    wrapper (wrap_for_brax_training, which the official FastTD3 uses): each env keeps the data
+    and observation of its first reset, and a finished episode restarts from them. info is
+    kept, as there. gymnax's step instead computes a fresh reset at every step and selects it
+    on done, so every step pays for the env's reset (CheetahRun's reset runs 200 physics steps).
+    Only the autoreset changes: reset() and reset_env() still reset fully.
+    """
+
+    def reset_env(self, key, params):
+        obs, state = super().reset_env(key, params)
+        first = PlaygroundFirstState(
+            inner=state.inner, steps=state.steps, first_data=state.inner.data, first_obs=state.inner.obs
+        )
+        return obs, first
+
+    def step_env(self, key, state, action, params):
+        obs, new_state, reward, done, info = super().step_env(key, state, action, params)
+        carried = PlaygroundFirstState(
+            inner=new_state.inner, steps=new_state.steps, first_data=state.first_data, first_obs=state.first_obs
+        )
+        return obs, carried, reward, done, info
+
+    @partial(jax.jit, static_argnames=("self",))
+    def step(self, key, state, action, params=None):
+        if params is None:
+            params = self.default_params
+        # gymnax's step hands step_env the first half of its key
+        key_step, _ = jax.random.split(key)
+        obs_st, state_st, reward, done, info = self.step_env(key_step, state, action, params)
+        inner_re = state_st.inner.replace(
+            data=state_st.first_data, obs=state_st.first_obs, done=jnp.zeros_like(state_st.inner.done)
+        )
+        state_re = state_st.replace(inner=inner_re, steps=jnp.zeros_like(state_st.steps))
+        state = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), state_re, state_st)
+        obs = jax.lax.select(done, self._select_obs(state_st.first_obs), obs_st)
+        return obs, state, reward, done, info

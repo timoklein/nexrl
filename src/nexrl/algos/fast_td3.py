@@ -9,7 +9,8 @@ noise scales resampled at episode ends, a twin distributional (C51) critic whose
 projection of the critic with the lower expected value, target policy smoothing with the current
 policy (no target policy), AdamW for actor and critic, several critic updates per vectorized env
 step on large batches, observation normalization updated from the replay batch, and
-bootstrapping through time-limit truncations.
+bootstrapping through time-limit truncations. With ``n_step > 1`` the critic learns from n-step
+returns built at sample time (official FastTD3 ``num_steps``).
 
 Dimension key:
     T: buffer rows per env (buffer_size_per_env)
@@ -19,10 +20,11 @@ Dimension key:
     C: num critics (2)
     N: atoms of the categorical value distribution
     U: critic updates per env step (num_critic_updates_per_policy_update * num_policy_updates_per_step)
+    K: rows of an n-step window (n_step)
 """
 
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import chex
 import jax
@@ -62,6 +64,102 @@ class Transition(NamedTuple):
     next_obs: chex.Array  # pre-reset observation
 
 
+class NStepTransition(NamedTuple):
+    """Stored transition when n_step > 1: the time-limit flag ends an n-step window."""
+
+    obs: jax.Array
+    action: jax.Array
+    reward: jax.Array
+    terminated: jax.Array
+    truncated: jax.Array  # time limit without physical termination
+    next_obs: jax.Array
+
+
+class NStepBatch(NamedTuple):
+    """Sampled n-step transition: the window's start state and action, its discounted reward sum,
+    and the next obs and termination flag of its last row."""
+
+    obs: jax.Array
+    action: jax.Array
+    reward: jax.Array  # sum_k gamma^k r_k over the rows of the window
+    terminated: jax.Array  # termination flag of the last row
+    next_obs: jax.Array  # next obs of the last row
+    discount: jax.Array  # gamma ** rows in the window
+
+
+def nstep_transitions(
+    replay_buffer: CircularBuffer, start_rows: jax.Array, env_ids: jax.Array, *, n_step: int, gamma: float
+) -> NStepBatch:
+    """Gather n-step transitions of envs ``env_ids`` starting at rows ``start_rows`` (same shape).
+
+    A window holds up to ``n_step`` consecutive rows and stops at the first row that ends the episode
+    (terminated or truncated) or that is the newest row in the buffer: past the newest row the ring
+    holds the oldest data. Sampling follows the official FastTD3 / RL-X n-step buffer, which stops
+    the bootstrap at the newest row but keeps summing rewards past it; here the reward sum and the
+    discount stop there too, as in the SB3 n-step buffer that FastTD3 cites.
+    """
+    size = replay_buffer.size
+    data = cast(NStepTransition, replay_buffer.data)
+    rows_BK = (start_rows[..., None] + jnp.arange(n_step)) % size  # leading dims of start_rows, then K
+    env_BK = env_ids[..., None]
+    newest_row = (replay_buffer.index - 1) % size
+    ends_BK = jnp.maximum(data.terminated[rows_BK, env_BK], data.truncated[rows_BK, env_BK])
+    ends_BK = jnp.maximum(ends_BK, (rows_BK == newest_row).astype(jnp.float32))
+    # A row belongs to the window if no earlier row ended it
+    ended_before_BK = jnp.concatenate([jnp.zeros_like(ends_BK[..., :1]), ends_BK[..., :-1]], axis=-1)
+    in_window_BK = jnp.cumprod(1.0 - ended_before_BK, axis=-1)
+    num_rows_B = in_window_BK.sum(axis=-1)
+    discounts_K = gamma ** jnp.arange(n_step, dtype=jnp.float32)
+    reward_B = (data.reward[rows_BK, env_BK] * in_window_BK * discounts_K).sum(axis=-1)
+    last_rows_B = (start_rows + num_rows_B.astype(jnp.int32) - 1) % size
+    return NStepBatch(
+        obs=data.obs[start_rows, env_ids],
+        action=data.action[start_rows, env_ids],
+        reward=reward_B,
+        terminated=data.terminated[last_rows_B, env_ids],
+        next_obs=data.next_obs[last_rows_B, env_ids],
+        discount=gamma**num_rows_B,
+    )
+
+
+def make_fast_td3_networks(
+    *,
+    policy_in_features: int,
+    in_features: int,
+    action_dim: int,
+    num_critics: int,
+    config: FastTD3Config,
+    rngs: nnx.Rngs,
+) -> tuple[nnx.Module, nnx.Module]:
+    """Build the FastTD3 actor and twin critic.
+
+    This is the default for the ``make_networks`` hook of ``train_fast_td3``, and a replacement must
+    match its signature and interfaces:
+        actor: ``__call__(obs) -> action`` in [-1, 1] (B, A) and ``act(obs, rng) -> action``; it slices
+            ``config.policy_obs_dim`` itself.
+        critic: ``__call__(obs, action) -> logits`` (C, B, N), ``q_values(obs, action) -> (C, B)`` and a
+            ``support`` (N,) array; target updates average its ``nnx.Param`` leaves.
+    """
+    actor = FastTD3Policy(
+        in_features=policy_in_features,
+        action_dim=action_dim,
+        hidden_layer_sizes=config.actor_hidden_layer_sizes,
+        rngs=rngs,
+        policy_obs_dim=config.policy_obs_dim,
+    )
+    critic = FastTD3Critic(
+        obs_dim=in_features,
+        action_dim=action_dim,
+        num_atoms=config.num_atoms,
+        v_min=config.v_min,
+        v_max=config.v_max,
+        hidden_layer_sizes=config.critic_hidden_layer_sizes,
+        rngs=rngs,
+        num_critics=num_critics,
+    )
+    return actor, critic
+
+
 class FastTD3Carry(NamedTuple):
     """Non-module carry state for FastTD3 training."""
 
@@ -85,6 +183,8 @@ def train_fast_td3(
     env: GymnaxEnv | None = None,
     env_params: EnvParams = None,
     log_fn: Callable[..., None] | None = None,
+    make_networks: Callable[..., tuple[nnx.Module, nnx.Module]] | None = None,
+    eval_fn: Callable[..., dict[str, jax.Array]] | None = None,
 ) -> tuple[TrainState, Metrics]:
     """Train a FastTD3 agent.
 
@@ -97,6 +197,14 @@ def train_fast_td3(
         env_params: Optional environment parameters. Uses defaults if ``None``.
         log_fn: Optional callback invoked at each evaluation point via
             ``jax.debug.callback``. Receives the metrics dict.
+        make_networks: Optional replacement for ``make_fast_td3_networks`` (same keyword arguments,
+            returns ``(actor, critic)`` with the interfaces documented there).
+        eval_fn: Optional extra evaluation, called as ``eval_fn(act_fn=, actor=, critic=, obs_rms=, rng=)``
+            at the initial evaluation and at every evaluation point; requires ``run_evaluation``.
+            ``act_fn(obs, rng)`` maps one raw observation to an env action, as in the built-in
+            evaluation. The returned dict (fixed keys and shapes) is merged into the metrics. Its
+            ``rng`` derives from ``rng`` and the global step, so training draws the same keys with
+            and without the hook.
 
     Returns:
         A ``(state, metrics)`` tuple where ``state`` is a dict of trained
@@ -138,6 +246,15 @@ def train_fast_td3(
             "Set policy_obs_dim=None for envs without a privileged observation."
         )
     policy_in_features = in_features if config.policy_obs_dim is None else config.policy_obs_dim
+    if config.n_step < 1:
+        raise ValueError(f"n_step must be >= 1, got {config.n_step}.")
+    if config.n_step > config.buffer_size_per_env:
+        raise ValueError(f"n_step={config.n_step} must be <= buffer_size_per_env={config.buffer_size_per_env}.")
+    if config.n_step > 1 and config.learning_starts < config.n_step:
+        # As RL-X: the first windows must fit in the rows collected during warm-up
+        raise ValueError(f"learning_starts={config.learning_starts} must be >= n_step={config.n_step}.")
+    if eval_fn is not None and not config.run_evaluation:
+        raise ValueError("eval_fn runs at the evaluation points; set run_evaluation=True.")
 
     vmap_step, vmap_reset = create_vec_env_fns(env, config)
 
@@ -150,28 +267,21 @@ def train_fast_td3(
 
     # Create networks
     rngs = nnx.Rngs(rng)
-    actor = FastTD3Policy(
-        in_features=policy_in_features,
+    actor, critic = (make_networks if make_networks is not None else make_fast_td3_networks)(
+        policy_in_features=policy_in_features,
+        in_features=in_features,
         action_dim=action_dim,
-        hidden_layer_sizes=config.actor_hidden_layer_sizes,
+        num_critics=NUM_CRITICS,
+        config=config,
         rngs=rngs,
-        policy_obs_dim=config.policy_obs_dim,
     )
     actor_optimizer = nnx.Optimizer(actor, optax.adamw(config.learning_rate, weight_decay=config.weight_decay), wrt=nnx.Param)
-    critic = FastTD3Critic(
-        obs_dim=in_features,
-        action_dim=action_dim,
-        num_atoms=config.num_atoms,
-        v_min=config.v_min,
-        v_max=config.v_max,
-        hidden_layer_sizes=config.critic_hidden_layer_sizes,
-        rngs=rngs,
-        num_critics=NUM_CRITICS,
-    )
     critic_optimizer = nnx.Optimizer(
         critic, optax.adamw(config.learning_rate, weight_decay=config.weight_decay), wrt=nnx.Param
     )
     critic_target = nnx.clone(critic)
+    # Root key of the eval_fn keys, kept apart from the training stream (rngs folds its call count into rng)
+    eval_fn_key = jax.random.split(rng)[1]
 
     # Init env
     obs, env_state = vmap_reset(jax.random.split(rngs(), num_envs), env_params)
@@ -181,16 +291,24 @@ def train_fast_td3(
 
     # Init replay buffer: one ring of buffer_size_per_env rows, each row holding all envs
     rows = config.buffer_size_per_env
-    buf = CircularBuffer.empty(
-        rows,
-        Transition(
+    if config.n_step > 1:
+        buffer_data = NStepTransition(
+            obs=jnp.zeros((rows, num_envs, *obs_shape), dtype=jnp.float32),  # (T, B, D)
+            action=jnp.zeros((rows, num_envs, action_dim), dtype=jnp.float32),  # (T, B, A)
+            reward=jnp.zeros((rows, num_envs), dtype=jnp.float32),  # (T, B)
+            terminated=jnp.zeros((rows, num_envs), dtype=jnp.float32),  # (T, B)
+            truncated=jnp.zeros((rows, num_envs), dtype=jnp.float32),  # (T, B)
+            next_obs=jnp.zeros((rows, num_envs, *obs_shape), dtype=jnp.float32),  # (T, B, D)
+        )
+    else:
+        buffer_data = Transition(
             obs=jnp.zeros((rows, num_envs, *obs_shape), dtype=jnp.float32),  # (T, B, D)
             action=jnp.zeros((rows, num_envs, action_dim), dtype=jnp.float32),  # (T, B, A)
             reward=jnp.zeros((rows, num_envs), dtype=jnp.float32),  # (T, B)
             terminated=jnp.zeros((rows, num_envs), dtype=jnp.float32),  # (T, B)
             next_obs=jnp.zeros((rows, num_envs, *obs_shape), dtype=jnp.float32),  # (T, B, D)
-        ),
-    )
+        )
+    buf = CircularBuffer.empty(rows, buffer_data)
 
     zero_train_metrics = {k: jnp.float32(0.0) for k in _FAST_TD3_METRIC_NAMES}
 
@@ -238,13 +356,23 @@ def train_fast_td3(
         completed_count = carry.completed_returns_count + jnp.sum(done_B.astype(jnp.int32))
         reset_running_B = new_running_B * (1 - done_B)
 
-        transition = Transition(
-            obs=carry.last_obs.astype(jnp.float32),
-            action=action_BA,
-            reward=reward_B.astype(jnp.float32),
-            terminated=terminated_B.astype(jnp.float32),
-            next_obs=final_obs_BD.astype(jnp.float32),
-        )
+        if config.n_step > 1:
+            transition = NStepTransition(
+                obs=carry.last_obs.astype(jnp.float32),
+                action=action_BA,
+                reward=reward_B.astype(jnp.float32),
+                terminated=terminated_B.astype(jnp.float32),
+                truncated=truncated_B.astype(jnp.float32),
+                next_obs=final_obs_BD.astype(jnp.float32),
+            )
+        else:
+            transition = Transition(
+                obs=carry.last_obs.astype(jnp.float32),
+                action=action_BA,
+                reward=reward_B.astype(jnp.float32),
+                terminated=terminated_B.astype(jnp.float32),
+                next_obs=final_obs_BD.astype(jnp.float32),
+            )
         return carry._replace(
             last_obs=next_obs_BD,
             env_state=new_env_state,
@@ -257,8 +385,17 @@ def train_fast_td3(
         )
 
     # --- Sample all batches of one env step ---
-    def sample_batches(replay_buffer, rng):
+    def sample_batches(replay_buffer: CircularBuffer, rng: jax.Array):
         rng_t, rng_e = jax.random.split(rng)
+        if config.n_step > 1:
+            # Until the ring is full, a window must end at or before the newest row (RL-X);
+            # once full, every row starts a window, cut at the newest row by nstep_transitions
+            max_start = jnp.where(
+                replay_buffer.full, replay_buffer.size, jnp.maximum(1, replay_buffer.index - config.n_step + 1)
+            )
+            t_UB = jax.random.randint(rng_t, (num_critic_updates, config.batch_size), 0, max_start)
+            e_UB = jax.random.randint(rng_e, (num_critic_updates, config.batch_size), 0, num_envs)
+            return nstep_transitions(replay_buffer, t_UB, e_UB, n_step=config.n_step, gamma=config.gamma)  # leaves (U, B, ...)
         t_UB = jax.random.randint(rng_t, (num_critic_updates, config.batch_size), 0, replay_buffer.num_entries)
         e_UB = jax.random.randint(rng_e, (num_critic_updates, config.batch_size), 0, num_envs)
         return jax.tree.map(lambda x: x[t_UB, e_UB], replay_buffer.data)  # leaves (U, B, ...)
@@ -275,7 +412,8 @@ def train_fast_td3(
 
         # Distributional target on the shared support, projected for each target critic
         support_N = critic.support
-        discount_B = config.gamma * (1.0 - mb.terminated)
+        # n-step batches carry gamma ** (rows in the window)
+        discount_B = (mb.discount if config.n_step > 1 else config.gamma) * (1.0 - mb.terminated)
         target_support_BN = jnp.clip(mb.reward[:, None] + discount_B[:, None] * support_N, config.v_min, config.v_max)
         target_probs_CBN = jax.nn.softmax(critic_target(mb.next_obs, next_action_BA), axis=-1)
         project_BN = jax.vmap(rlax.categorical_l2_project, in_axes=(0, 0, None))
@@ -393,23 +531,37 @@ def train_fast_td3(
         return carry, actor, actor_optimizer, critic, critic_optimizer, critic_target, rngs
 
     # --- Eval callback ---
-    def eval_callback(carry, actor, rngs):
+    def eval_callback(carry, actor, critic, rngs):
         # The policy acts in [-1, 1]; clip and rescale to the env range exactly as in collection
         act_fn = make_eval_act(lambda obs, rng: to_env_action(actor.act(obs, rng)), config, carry.obs_rms)
-        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
+        eval_lengths, eval_returns = evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
+        if eval_fn is None:
+            return eval_lengths, eval_returns, {}
+        hook_metrics = eval_fn(
+            act_fn=act_fn,
+            actor=actor,
+            critic=critic,
+            obs_rms=carry.obs_rms,
+            rng=jax.random.fold_in(eval_fn_key, carry.global_step),
+        )
+        clashes = set(hook_metrics) & {"eval_lengths", "eval_returns", "train_return", "global_step", *_FAST_TD3_METRIC_NAMES}
+        if clashes:
+            raise ValueError(f"eval_fn returned built-in metric names {sorted(clashes)}.")
+        return eval_lengths, eval_returns, hook_metrics
 
     # --- Outer training loop ---
     steps_per_iter = int(np.ceil(config.eval_freq / num_envs))
     num_evals = int(np.ceil(config.total_timesteps / config.eval_freq))
 
     if config.run_evaluation and not config.skip_initial_evaluation:
-        eval_lengths, eval_returns = eval_callback(carry, actor, rngs)
+        eval_lengths, eval_returns, hook_metrics = eval_callback(carry, actor, critic, rngs)
         initial_metrics = {
             "eval_lengths": eval_lengths,
             "eval_returns": eval_returns,
             "train_return": jnp.float32(0.0),
             "global_step": jnp.int32(0),
             **{k: jnp.float32(0.0) for k in _FAST_TD3_METRIC_NAMES},
+            **hook_metrics,
         }
         if log_fn is not None:
             jax.debug.callback(log_fn, initial_metrics)
@@ -432,10 +584,11 @@ def train_fast_td3(
         train_return = carry.completed_returns_sum / jnp.maximum(carry.completed_returns_count, 1)
 
         if config.run_evaluation:
-            eval_lengths, eval_returns = eval_callback(carry, act, rngs)
+            eval_lengths, eval_returns, hook_metrics = eval_callback(carry, act, cr, rngs)
         else:
             eval_lengths = jnp.zeros(128)
             eval_returns = jnp.zeros(128)
+            hook_metrics = {}
 
         metrics = {
             "eval_lengths": eval_lengths,
@@ -443,6 +596,7 @@ def train_fast_td3(
             "train_return": train_return,
             "global_step": jnp.int32(carry.global_step),
             **avg_tm,
+            **hook_metrics,
         }
 
         if log_fn is not None:

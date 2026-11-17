@@ -129,7 +129,7 @@ Namespaced strings: `CartPole-v1` (gymnax), `gymnasium/CartPole-v1`, `brax/halfc
 **Key gotchas:**
 - **`jax.ensure_compile_time_eval()`**: `compat/` wraps env creation in this. Third-party packages (Craftax) run `jnp` ops at import time — if first triggered inside JIT, those ops see tracers and crash.
 - **Atari/DMC** use `MultiInstanceGymnasium2GymnaxEnv` — sequential `jax.pure_callback`, no vectorization. Atari obs: `(4, 84, 84)` uint8. DMC pixels: `(3, 84, 84)` uint8. Atari runs must be one seed per process: the multi-instance adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
-- **MuJoCo Playground** (`playground/`): JAX-native, fully jittable/vmappable. Uses `impl="jax"` (warp has CUDA issues on some GPUs). Episode truncation handled by wrapper. The env config's `action_repeat` field is not read by the env (playground applies it in brax's training wrapper); pass `action_repeat=N` to `create_playground` instead, which sums rewards over N inner steps and shortens the episode to ceil(episode_length / N) agent steps. Vision limited (only CartpoleBalance as of 0.2.0) — use `dm_control/` for pixel training.
+- **MuJoCo Playground** (`playground/`): JAX-native, fully jittable/vmappable. Uses `impl="jax"` (warp has CUDA issues on some GPUs). Episode truncation handled by wrapper. The env config's `action_repeat` field is not read by the env (playground applies it in brax's training wrapper); pass `action_repeat=N` to `create_playground` instead, which sums rewards over N inner steps and shortens the episode to ceil(episode_length / N) agent steps. gymnax's `step` computes a full reset at every step and keeps it only on done, so each step pays for the env's reset (CheetahRun's reset settles for 200 physics steps). `cached_reset=True` (`FastTD3Config.cached_reset`, off by default) restarts a finished episode from each env's first data and obs instead, as playground's training wrapper (`full_reset=False`) and the official FastTD3; `reset()` itself stays a full reset. Vision limited (only CartpoleBalance as of 0.2.0) — use `dm_control/` for pixel training.
 - **Craftax** uses optimistic reset via `create_vec_env_fns()` (pre-computes `num_envs // 16` resets per step).
 
 **CNN encoders**: Set `encoder_kwargs=CNNConfig(encoder="nature"|"impala")`. Both handle NCHW→NHWC and uint8→float32/255 internally. Obs stay uint8 throughout storage — converted at forward-pass time. `FloatObsWrapper` skipped when `encoder_kwargs` is set. Each network gets its own encoder instance; Polyak updates include encoder params.
@@ -196,6 +196,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 - **Polyak (τ=0.125) runs after every critic update** (8 per env step), not once per env step.
 - **Obs RMS is updated from the sampled batch** (obs + next_obs of all U batches), not from fresh env obs; warm-up acts with the identity-initialized normalizer.
 - Buffer is a `(buffer_size_per_env, num_envs)` ring (`CircularBuffer.append` of one row per vectorized step); sampling draws a row and an env uniformly.
+- `make_networks` and `eval_fn` hooks as in FastTD3 (see there); the FastSAC hook also receives `action_range`.
 
 ### FlashSAC
 
@@ -233,13 +234,15 @@ These are non-obvious design decisions that differ from naive implementations. R
 
 ### FastTD3
 
-- **Reference is RL-X `fasttd3/flax_full_jit`** (default path only: n_steps=1, clipped double-Q on, no grad clipping, no LR anneal). Defaults in `FastTD3Config` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
+- **Reference is RL-X `fasttd3/flax_full_jit`** (clipped double-Q on, no grad clipping, no LR anneal). Defaults in `FastTD3Config` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`).
+- **`n_step` (default 1) builds n-step returns at sample time**, as the official FastTD3 `num_steps` and RL-X `n_steps`. With `n_step > 1` the buffer also stores `truncated`, and `nstep_transitions` cuts each window at the first terminated or truncated row and at the newest row of a full ring. Rewards, the bootstrap obs and gamma^k all stop at the cut. The reference stops only the bootstrap at the newest row and sums rewards past it, from the oldest rows. Requires `learning_starts >= n_step`. `configs/fast_td3/playground/cheetah_run.yaml` is the official `CheetahRunArgs` (3-step returns, v ±500, std_min 0.1, policy noise 0.1, 1024 envs).
 - **Asymmetric observations** as in FastSAC: the policy sees `obs[..., :policy_obs_dim]` of the normalized obs (103 on G1), the critic and the obs normalizer the full obs.
 - **The G1 yaml uses `buffer_size_per_env: 3072`**, not the reference 10240: 10240 x 4096 transitions of the 216-d obs is ~78 GB and does not fit a 40 GB GPU.
 - **Exploration**: per-env Gaussian noise std drawn from U[0.001, 0.4], redrawn for an env when its episode ends. The noisy policy also acts during warm-up (no uniform random actions).
 - **The buffer stores the noisy UNCLIPPED action**; the clip to [-1, 1] and the rescale to the env range happen only at the env boundary (collection and eval).
 - **Both critics train on the same target**: the projection of the target critic with the lower expected value. The policy maximizes the min over critics. The next action uses the current policy plus clipped smoothing noise (std 0.001, clip 0.5); there is no target policy.
 - **Polyak (tau=0.1) runs after every critic update** (2 per env step); truncation bootstrap and the batch-updated obs RMS work as in FastSAC.
+- **Hooks (FastTD3 and FastSAC)**: `make_networks` replaces `make_fast_td3_networks`/`make_fast_sac_networks` (same keyword arguments, same actor and critic interfaces). `eval_fn(act_fn=, actor=, critic=, obs_rms=, rng=)` runs at every evaluation point (requires `run_evaluation`), and its dict is merged into the metrics. Its keys come from `split(rng)[1]` folded with the global step, so training draws the same keys with and without it. Both default to None, which leaves the default path bitwise identical.
 
 ### DrQ-v2
 
