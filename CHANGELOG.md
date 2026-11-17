@@ -22,6 +22,13 @@
 - `gymnasium/` adapter: time limits never fired (the per-step reset zeroed the step counter); vmapped reset now works
 - DMC and Navix adapters: removed the phantom transition after each episode end (two-step / lazy reset)
 - CI test job split into 4 parallel shards
+- `--track` now stops before training when `wandb` is missing (it used to fail after training); `wandb` is the new `track` extra
+- FlashSAC `test_env4` pins full float32 matmul precision; it failed on A100 GPUs at the default TF32 precision
+
+### Other
+
+- `THIRD_PARTY_NOTICES.md` lists code derived from rejax, purejaxql, RL-X and craftax_baselines with their licenses
+- Removed unused rejax images from `img/`
 
 ## [0.1.0] - 2026-04-14
 

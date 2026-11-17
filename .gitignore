@@ -35,3 +35,6 @@ venv/
 # large files
 data/
 logs/
+
+# machine-local Claude Code notes
+CLAUDE.local.md
