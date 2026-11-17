@@ -1,3 +1,9 @@
+# Derived from facebookresearch/MRQ (https://github.com/facebookresearch/MRQ),
+# Copyright (c) Meta Platforms, Inc. and affiliates, licensed under CC BY-NC 4.0
+# (https://creativecommons.org/licenses/by-nc/4.0/). Modified: ported from PyTorch to JAX / Flax NNX.
+# Unlike the rest of nexrl, this file is licensed under CC BY-NC 4.0, not Apache-2.0, and may only
+# be used for non-commercial purposes. See THIRD_PARTY_NOTICES.md.
+
 """MrQ networks: learned state embeddings with LN-MLP architecture.
 
 "Towards General-Purpose Model-Free RL" (Fujimoto et al.)

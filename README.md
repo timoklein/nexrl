@@ -122,12 +122,14 @@ uv run python train.py dreamer --config configs/dreamer/gymnax/cartpole.yaml --i
 
 | Algorithm | Paper | Discrete | Continuous |
 |-----------|-------|:--------:|:----------:|
-| [MrQ](src/nexrl/algos/mrq.py) | [Fujimoto et al., 2025](https://arxiv.org/abs/2412.20708) | x | x |
-| [MRS.Q](src/nexrl/algos/mrsq.py) | [Fujimoto et al., 2025](https://arxiv.org/abs/2506.01464) | x | x |
+| [MrQ](src/nexrl/algos/mrq.py)\* | [Fujimoto et al., 2025](https://arxiv.org/abs/2412.20708) | x | x |
+| [MRS.Q](src/nexrl/algos/mrsq.py)\* | [Fujimoto et al., 2025](https://arxiv.org/abs/2506.01464) | x | x |
 | [Dreamer](src/nexrl/algos/dreamer.py) | [Hafner et al., 2024](https://arxiv.org/abs/2301.04104) | x | x |
 | [SGF](src/nexrl/algos/sgf.py) | [Robine et al., 2025](https://arxiv.org/abs/2502.11757) | x | |
 | [MuZero](src/nexrl/algos/muzero.py) | [Schrittwieser et al., 2020](https://arxiv.org/abs/1911.08265) | x | |
 | [AlphaZero](src/nexrl/algos/alphazero.py) | [Silver et al., 2018](https://arxiv.org/abs/1712.01815) | x | |
+
+\* Derived from Meta's [MR.Q](https://github.com/facebookresearch/MRQ) and [MRS.Q](https://github.com/facebookresearch/MRSQ) code and licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/): non-commercial use only. See [License](#license).
 
 ## Environments
 
@@ -148,7 +150,10 @@ Environments are specified as namespaced strings. Gymnax environments use no pre
 
 ## License
 
-[Apache 2.0](LICENSE). Code derived from other projects and their licenses are listed in
+[Apache 2.0](LICENSE), except for the MrQ and MRS.Q files (`src/nexrl/algos/mrq.py`,
+`src/nexrl/algos/mrsq.py`, `src/nexrl/networks/mrq.py`, `src/nexrl/networks/mrsq.py`), which are
+licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) and may only be used
+for non-commercial purposes. Code derived from other projects and their licenses are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Citations
