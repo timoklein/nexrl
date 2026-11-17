@@ -46,24 +46,6 @@ uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml --track --w
 CUDA_VISIBLE_DEVICES=2 uv run python train.py ppo --config configs/ppo/gymnax/cartpole.yaml
 ```
 
-## Throughput ledger
-
-| machine (GPU) | benchmark | settings | SPS | peak VRAM | packing | date |
-|---|---|---|---|---|---|---|
-| this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | RR=1, num_envs=1, eval_freq 10k (10x128-ep evals) | 52 eff. | 8.8 GB | 3/GPU, near-linear (CPU-bound on ALE) | 2026-08-20 |
-| this box (A100-PCIE-40GB) | DrQ Atari-100k Breakout | reference net (SAME/7744), eval_freq 100k (1x400-ep final eval) | ~97 eff. (17.3 min/run) | — | 3/GPU | 2026-08-21 |
-| this box (A100-PCIE-40GB) | FastSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 8192, 8 critic updates/step), 102.4M steps, no eval | ~16.1k train (~14.9k incl. 2.5 min compile) | 10.2 GB | — | 2026-10-16 |
-| this box (A100-PCIE-40GB) | FlashSAC playground/G1JoystickFlatTerrain | reference config (4096 envs, batch 2048, 2 critic updates/step, 10M buffer), 50M steps, no eval | ~43k train (~26k incl. ~12 min compile) | 36.1 GB (mostly the 10M-row buffer) | 1/GPU | 2026-10-16 |
-| this box (A100-PCIE-40GB) | FastTD3 playground/G1JoystickFlatTerrain | reference config except buffer 3072 rows/env (4096 envs, batch 32768, 2 critic updates/step), 102.4M steps, 8 evals of 128 eps | ~15.3k incl. eval (~13.8k incl. ~12 min compile) | 23.0 GB (buffer 4096 rows/env OOMs) | 1/GPU | 2026-10-16 |
-| this box (A100-PCIE-40GB) | XQC playground/HumanoidRun | reference config (1 env, batch 256, 2 critic updates/step), 1M steps, 3 vmapped seeds, 10 evals of 128 eps | ~190 total over 3 seeds (~63 per seed), incl. eval and compile (4.4 h) | ~3.7 GB (nvidia-smi sample at 100k, preallocation off) | 3 seeds vmapped on 1 GPU | 2026-10-19 |
-| this box (A100-PCIE-40GB) | REPPO playground/G1JoystickFlatTerrain | reference config (4096 envs, 128-step rollouts, 4 epochs x 128 minibatches), 103.8M steps, 3 vmapped seeds, 7 evals of 128 eps | ~47k total over 3 seeds (~15.6k per seed), incl. eval and ~10 min compile (1.85 h) | ~30.9 GB for 3 seeds (nvidia-smi sample, preallocation off) | 3 seeds vmapped on 1 GPU | 2026-10-20 |
-
-Notes: effective SPS includes eval overhead — training alone is ~350 SPS (10k steps + compile in 58s);
-the ten 128-episode eval points are ~85% of wall-clock and lengthen as the agent improves. `nvidia-smi`
-shows JAX's preallocated ~30 GB, not the 8.8 GB working set — measure with
-`XLA_PYTHON_CLIENT_PREALLOCATE=false`. Atari runs must be one seed per process: the multi-instance
-adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
-
 ## Algorithm Verification
 
 When implementing or modifying algorithms, verify correctness using benchmark environments:
@@ -71,7 +53,7 @@ When implementing or modifying algorithms, verify correctness using benchmark en
 - **Discrete**: `CartPole-v1`, threshold >480 (DQN, IQN, PQN, Rainbow, PPO, PPO-RNN, PPG, PPO-ICM, PPO-E3B, PPO-RND, V-MPO, MPO, AlphaZero, MuZero, Dreamer, MrQ, MRS.Q)
 - **Continuous**: `Pendulum-v1`, threshold >-200 (SAC, SAC-SimBa, FastSAC, FlashSAC, FastTD3, XQC, REPPO, TD3, PPO, PPO-RND, V-MPO-cont, MPO-cont, Dreamer, MrQ, MRS.Q)
 - **Visual**: `dm_control/cartpole-balance-v0` (pixels), >900 within 200k steps (DrQ-v2)
-- **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF, SGF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6, commit c4cc0e7; 19.38 with --noop-max 0)
+- **Visual Atari-100k**: `atari/Breakout-v5`, 100k env steps (DrQ, BBF, SGF); BBF target 370.6 (paper, 50 seeds); DrQ target 16.1 (paper Table 5, 5 seeds) — reproduced at 16.75 ± 0.66 (n=6; 19.38 with --noop-max 0)
 
 ## Architecture
 
@@ -146,7 +128,7 @@ Namespaced strings: `CartPole-v1` (gymnax), `gymnasium/CartPole-v1`, `brax/halfc
 
 **Key gotchas:**
 - **`jax.ensure_compile_time_eval()`**: `compat/` wraps env creation in this. Third-party packages (Craftax) run `jnp` ops at import time — if first triggered inside JIT, those ops see tracers and crash.
-- **Atari/DMC** use `MultiInstanceGymnasium2GymnaxEnv` — sequential `jax.pure_callback`, no vectorization. Atari obs: `(4, 84, 84)` uint8. DMC pixels: `(3, 84, 84)` uint8.
+- **Atari/DMC** use `MultiInstanceGymnasium2GymnaxEnv` — sequential `jax.pure_callback`, no vectorization. Atari obs: `(4, 84, 84)` uint8. DMC pixels: `(3, 84, 84)` uint8. Atari runs must be one seed per process: the multi-instance adapter aliases vmapped seed lanes (`--num-seeds > 1` corrupts data).
 - **MuJoCo Playground** (`playground/`): JAX-native, fully jittable/vmappable. Uses `impl="jax"` (warp has CUDA issues on some GPUs). Episode truncation handled by wrapper. The env config's `action_repeat` field is not read by the env (playground applies it in brax's training wrapper); pass `action_repeat=N` to `create_playground` instead, which sums rewards over N inner steps and shortens the episode to ceil(episode_length / N) agent steps. Vision limited (only CartpoleBalance as of 0.2.0) — use `dm_control/` for pixel training.
 - **Craftax** uses optimistic reset via `create_vec_env_fns()` (pre-computes `num_envs // 16` resets per step).
 
@@ -218,7 +200,7 @@ These are non-obvious design decisions that differ from naive implementations. R
 ### FlashSAC
 
 - **Reference is RL-X `flashsac/flax_full_jit`** (default path only: n_steps=1, no LR warmup). Defaults in `FlashSACConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, `obs_key: privileged_state`). `total_timesteps` is rounded up to a multiple of 4096.
-- **Asymmetric observations**: the policy sees `obs[..., :policy_obs_dim]` (103 on G1, the `state` prefix of `privileged_state`), as in RL-X. The slice comes before the policy's input BatchNorm. The critic sees the full obs. Envs without a privileged part need `policy_obs_dim: null`; `train_flash_sac` raises if it is >= the obs dim. On G1 the slice delays learning to stay upright (eval length at 18.8M: 116-216 sliced vs 492-570 full obs, 3 seeds), and the gap closes by ~50M. Policy probes with the clean copies of the 103 dims, or with the quantities `state` lacks, each recover part of it: the cost of the noisy deployable obs, not a bug (`logs/2026-10-21_flashsac_slice/`).
+- **Asymmetric observations**: the policy sees `obs[..., :policy_obs_dim]` (103 on G1, the `state` prefix of `privileged_state`), as in RL-X. The slice comes before the policy's input BatchNorm. The critic sees the full obs. Envs without a privileged part need `policy_obs_dim: null`; `train_flash_sac` raises if it is >= the obs dim. On G1 the slice delays learning to stay upright (eval length at 18.8M: 116-216 sliced vs 492-570 full obs, 3 seeds), and the gap closes by ~50M. Policy probes with the clean copies of the 103 dims, or with the quantities `state` lacks, each recover part of it: the cost of the noisy deployable obs, not a bug.
 - **`project_params` runs after EVERY actor and critic optimizer step and at init, never on the target.** The target gets Polyak only. Kernels get unit column norm, RMSNorm scales and BatchNorm concat(scale, bias) get norm sqrt(d).
 - **CrossQ-style BatchNorm**: the policy loss runs a train-mode forward on concat(s, s'). The critic loss does the same for both the online and the target critic. The target BN stats update from its own forward, so the target is a module ARGUMENT to the loss, not a closure.
 - **BN mode per call site**: collection, eval, next-action sampling and the critic inside the policy loss use running averages (`train=False`). Only the forwards above use batch statistics.
@@ -241,12 +223,12 @@ These are non-obvious design decisions that differ from naive implementations. R
 ### REPPO
 
 - **Reference is RL-X `reppo/flax_full_jit`** (default path only: no LR anneal). Defaults in `REPPOConfig` = reference algorithm defaults + RL-X's G1 env config (4096 envs, 128-step rollouts, `obs_key: privileged_state`).
-- **`g1_joystick_flat_terrain_official.yaml`** holds the official REPPO repo's G1 settings (1024 envs, 32-step rollouts, 8 epochs x 4 minibatches, gamma 0.97, critic 1024, bins on +-10). They learn much faster on G1: eval ~31 at 52M steps vs ~18 at 104M with the RL-X yaml (`logs/2026-10-20_reppo_official/`). The official actor has 3 hidden layers, which no config reaches.
+- **`g1_joystick_flat_terrain_official.yaml`** holds the official REPPO repo's G1 settings (1024 envs, 32-step rollouts, 8 epochs x 4 minibatches, gamma 0.97, critic 1024, bins on +-10). They learn much faster on G1: eval ~31 at 52M steps vs ~18 at 104M with the RL-X yaml. The official actor has 3 hidden layers, which no config reaches.
 - **Asymmetric observations**: the policy sees `obs[..., :policy_obs_dim]` (103 on G1, the `state` prefix of `privileged_state`), the critic and the obs normalizer the full obs. Envs without a privileged part need `policy_obs_dim: null`; `train_reppo` raises if it is >= the obs dim.
 - **On-policy with a Q critic**: each rollout stores soft rewards r - gamma * alpha * log pi(a'|s') (also on terminal steps, as in the reference) and the critic's value and features at (final_obs, a'), all computed at collection time. TD(lambda) targets are built once per rollout (`_td_lambda_targets`); truncated steps bootstrap from the next-state value alone.
 - **Critic**: HL-Gauss (151 bins on +-100, sigma 0.75 bin widths) plus an auxiliary head predicting the next features and the reward. Truncated steps are masked out of the critic loss, truncated and terminal steps out of the aux loss. No target network.
 - **Policy**: pathwise gradient through the just-updated critic. Per state, the loss switches to sg(beta) * KL once the 16-sample KL to the pre-rollout policy exceeds `kl_bound`. The entropy and KL coefficients are `nnx.Param`s of the policy, so the policy optimizer (global-norm clip 0.5) trains them.
-- **The KL estimate is not 0 at identical params**: saturated tanh samples get a different log-prob after clip + atanh. The reference formulas give the same self-KL (`logs/2026-10-20_reppo/kl_selfcheck.py`).
+- **The KL estimate is not 0 at identical params**: saturated tanh samples get a different log-prob after clip + atanh. The reference formulas give the same self-KL.
 - **Obs RMS** is updated from the raw obs at every rollout step before acting; the stored obs and the final obs are normalized with the updated stats.
 
 ### FastTD3
