@@ -114,16 +114,19 @@ def test_env4():
     # exactly its bias, while its eval-mode output divides the running-mean lag by sqrt(1e-5) and
     # is noise (probe: eval action anywhere in [-0.9, 0.9] across seeds, train-mode action ~+0.9).
     # The assertion therefore uses train-mode samples, the actions the policy loss optimizes.
-    state, _ = _train(TestEnv4Continuous())
+    # Full fp32 matmuls: with the GPU default (TF32 on A100) the Q/action correlation lands at
+    # 0.935-0.938 instead of above 0.95; CPU and "highest" both pass.
+    with jax.default_matmul_precision("highest"):
+        state, _ = _train(TestEnv4Continuous())
 
-    num_rngs = 100
-    obs_B1 = jnp.zeros((num_rngs, 1))
-    aa, _ = state["actor"](obs_B1, jax.random.PRNGKey(1), train=True)
-    assert sum(aa.squeeze(-1) > 0.0) >= 0.9 * num_rngs
+        num_rngs = 100
+        obs_B1 = jnp.zeros((num_rngs, 1))
+        aa, _ = state["actor"](obs_B1, jax.random.PRNGKey(1), train=True)
+        assert sum(aa.squeeze(-1) > 0.0) >= 0.9 * num_rngs
 
-    grid_B1 = jnp.linspace(-1.0, 1.0, num_rngs)[:, None]
-    q_B = _q_fn(state)(obs_B1, grid_B1)
-    assert jnp.corrcoef(q_B, grid_B1.squeeze(-1))[0, 1] > 0.95
+        grid_B1 = jnp.linspace(-1.0, 1.0, num_rngs)[:, None]
+        q_B = _q_fn(state)(obs_B1, grid_B1)
+        assert jnp.corrcoef(q_B, grid_B1.squeeze(-1))[0, 1] > 0.95
 
 
 def test_env5():
