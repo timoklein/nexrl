@@ -63,6 +63,9 @@ dmc = [
     "shimmy[dm_control]>=2.0.0",
     "opencv-python-headless>=4.0.0",
 ]
+track = [
+    "wandb>=0.19",
+]
 
 [build-system]
 requires = ["hatchling"]

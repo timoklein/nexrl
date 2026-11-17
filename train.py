@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import functools
+import importlib.util
 import timeit
 
 import jax
@@ -136,6 +137,10 @@ if __name__ == "__main__":
     pre_parser.add_argument("--wandb-project", type=str, default="nexrl", help="wandb project name")
     pre_parser.add_argument("--wandb-entity", type=str, default=None, help="wandb entity (team/user)")
     pre_args, remaining = pre_parser.parse_known_args()
+
+    # wandb is optional and imported only after training: fail before training if it is missing.
+    if pre_args.track and importlib.util.find_spec("wandb") is None:
+        raise SystemExit("--track needs wandb: install it with `uv sync --extra track` or `pip install wandb`.")
 
     # Load YAML defaults and apply CLI overrides via tyro
     config_cls = ALGO_CONFIG_MAP[pre_args.algorithm]
