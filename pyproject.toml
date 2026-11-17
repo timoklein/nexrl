@@ -1,6 +1,6 @@
 [project]
 name = "nexrl"
-version = "0.1.0"
+version = "1.0.0"
 description = "Vectorizable RL algorithms in pure JAX"
 authors = [
     {name = "Timo Klein"},
