@@ -24,6 +24,7 @@ nexrl is a library of RL algorithms implemented in pure JAX using [Flax NNX](htt
 uv sync                                    # Core only
 uv sync --extra compat                     # With environment adapters (Atari, Craftax, Brax, ...)
 uv sync --extra compat --extra dmc         # Also with DeepMind Control Suite
+uv sync --extra track                      # Weights & Biases logging (--track)
 ```
 
 ## Quick start
@@ -147,7 +148,8 @@ Environments are specified as namespaced strings. Gymnax environments use no pre
 
 ## License
 
-[Apache 2.0](LICENSE)
+[Apache 2.0](LICENSE). Code derived from other projects and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Citations
 
