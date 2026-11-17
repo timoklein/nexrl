@@ -27,8 +27,9 @@
 
 ### Other
 
-- `THIRD_PARTY_NOTICES.md` lists code derived from rejax, purejaxql, RL-X and craftax_baselines with their licenses
-- Removed unused rejax images from `img/`
+- `THIRD_PARTY_NOTICES.md` lists code derived from rejax, purejaxql, Bigger Better Faster, Dopamine, RL-X, craftax_baselines and Meta's MR.Q / MRS.Q with their licenses
+- MrQ and MRS.Q (`algos/mrq.py`, `algos/mrsq.py`, `networks/mrq.py`, `networks/mrsq.py`) derive from Meta's CC BY-NC 4.0 code and are licensed CC BY-NC 4.0 (non-commercial use only); the rest of nexrl stays Apache-2.0
+- Removed unused rejax images from `img/` and the unused rejax `configs/configs.zip`
 
 ## [0.1.0] - 2026-04-14
 

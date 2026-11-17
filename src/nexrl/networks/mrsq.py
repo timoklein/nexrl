@@ -1,3 +1,9 @@
+# Derived from facebookresearch/MRQ and facebookresearch/MRSQ (https://github.com/facebookresearch/MRSQ),
+# Copyright (c) Meta Platforms, Inc. and affiliates, licensed under CC BY-NC 4.0
+# (https://creativecommons.org/licenses/by-nc/4.0/). Modified: ported from PyTorch to JAX / Flax NNX.
+# Unlike the rest of nexrl, this file is licensed under CC BY-NC 4.0, not Apache-2.0, and may only
+# be used for non-commercial purposes. See THIRD_PARTY_NOTICES.md.
+
 """MRS.Q networks: MrQ with simplicial embeddings and Q-ensemble.
 
 "Model-based Representations for Search and Q-learning" (Fujimoto et al.)

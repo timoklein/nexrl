@@ -1,8 +1,26 @@
 # Third-party notices
 
-nexrl is licensed under the Apache License 2.0 (see [LICENSE](LICENSE)). Parts of it are derived
-from the projects below. nexrl has modified all of these files: the code was ported to Flax NNX
-and restructured into nexrl's standalone `train_*` functions and shared utilities.
+nexrl is licensed under the Apache License 2.0 (see [LICENSE](LICENSE)), **except for the MrQ and
+MRS.Q files listed under [MR.Q and MRS.Q](#mrq-and-mrsq), which are licensed under CC BY-NC 4.0
+(non-commercial use only)**. Parts of nexrl are derived from the projects below. nexrl has modified
+all of these files: the code was ported to Flax NNX and restructured into nexrl's standalone
+`train_*` functions and shared utilities.
+
+## MR.Q and MRS.Q
+
+- Source: https://github.com/facebookresearch/MRQ and https://github.com/facebookresearch/MRSQ
+- Copyright (c) Meta Platforms, Inc. and affiliates
+- License: Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0),
+  https://creativecommons.org/licenses/by-nc/4.0/
+- Files (licensed under CC BY-NC 4.0, not Apache-2.0): `src/nexrl/algos/mrq.py`,
+  `src/nexrl/networks/mrq.py` (from MRQ); `src/nexrl/algos/mrsq.py`, `src/nexrl/networks/mrsq.py`
+  (from MRQ and MRSQ)
+- Modifications: ported from PyTorch to JAX / Flax NNX and restructured into standalone
+  `train_mrq` / `train_mrsq` functions.
+- These files may only be used for non-commercial purposes. `import nexrl` loads them, so using
+  nexrl commercially requires deleting the four files and their imports and registrations in
+  `src/nexrl/__init__.py`, `src/nexrl/algos/__init__.py`, `src/nexrl/networks/__init__.py` and
+  `src/nexrl/configs.py`.
 
 ## rejax
 
