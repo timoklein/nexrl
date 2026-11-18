@@ -410,6 +410,7 @@ class FastTD3Config(_BaseConfig):
     total_timesteps: int = 2_000_158_720
     eval_freq: int = 18_350_080
     gamma: float = 0.97
+    n_step: int = 1  # n-step returns built at sample time (official FastTD3 num_steps; RL-X n_steps)
     polyak: float = 0.9  # reference tau=0.1, applied after every critic update
     num_atoms: int = 101
     v_min: float = -10.0
@@ -421,6 +422,9 @@ class FastTD3Config(_BaseConfig):
     num_critic_updates_per_policy_update: int = 2
     num_policy_updates_per_step: int = 1  # critic updates per env step = 2 * 1 = 2
     normalize_observations: bool = True
+    # playground/ only: a finished episode restarts from each env's first state (playground's training
+    # wrapper default, full_reset=False), not from a fresh reset at every step
+    cached_reset: bool = False
     skip_initial_evaluation: bool = False
     run_evaluation: bool = False
 

@@ -233,6 +233,10 @@ def create_env(
     Skips FloatObsWrapper when a CNN encoder is configured (encoder handles normalization).
     """
     has_encoder = getattr(config, "encoder_kwargs", None) is not None
+    # cached_reset is applied by the playground adapter, which only exists when nexrl builds the env
+    # from its name; an env object passed in would silently keep the fresh resets.
+    if getattr(config, "cached_reset", False) and not (env is None and isinstance(config.env, str)):
+        raise ValueError("cached_reset needs config.env as a playground/ env name, not an env object.")
     if env is None:
         if isinstance(config.env, str):
             # terminal_on_life_loss is Atari-only (BBF); pass it through only when set
@@ -255,6 +259,11 @@ def create_env(
                 if not config.env.startswith(("playground/", "dm_control/")):
                     raise ValueError(f"action_repeat={action_repeat} is only supported for playground/ and dm_control/ envs.")
                 extra_env_kwargs["action_repeat"] = action_repeat
+            # cached_reset: playground/ only; False is passed nowhere
+            if getattr(config, "cached_reset", False):
+                if not config.env.startswith("playground/"):
+                    raise ValueError("cached_reset is only supported for playground/ envs.")
+                extra_env_kwargs["cached_reset"] = True
             env, env_params = create(config.env, num_envs=getattr(config, "num_envs", 1), **extra_env_kwargs)
         else:
             env = config.env

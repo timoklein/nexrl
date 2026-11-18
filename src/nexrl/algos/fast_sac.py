@@ -86,6 +86,47 @@ def _adamw(config: FastSACConfig) -> optax.GradientTransformation:
     )
 
 
+def make_fast_sac_networks(
+    *,
+    policy_in_features: int,
+    in_features: int,
+    action_dim: int,
+    action_range: tuple[float, float],
+    num_critics: int,
+    config: FastSACConfig,
+    rngs: nnx.Rngs,
+) -> tuple[nnx.Module, nnx.Module]:
+    """Build the FastSAC actor and twin critic.
+
+    This is the default for the ``make_networks`` hook of ``train_fast_sac``, and a replacement must
+    match its signature and interfaces:
+        actor: ``__call__(obs, rng) -> (action, log_prob)`` with actions in ``action_range`` (B, A), (B,),
+            and ``act(obs, rng) -> action`` for evaluation; it slices ``config.policy_obs_dim`` itself.
+        critic: ``__call__(obs, action) -> logits`` (C, B, N), ``q_values(obs, action) -> (C, B)`` and a
+            ``support`` (N,) array; target updates average its ``nnx.Param`` leaves.
+    """
+    actor = FastSACPolicy(
+        in_features=policy_in_features,
+        action_dim=action_dim,
+        action_range=action_range,
+        hidden_layer_sizes=config.actor_hidden_layer_sizes,
+        log_std_range=(config.log_std_min, config.log_std_max),
+        rngs=rngs,
+        policy_obs_dim=config.policy_obs_dim,
+    )
+    critic = FastSACCritic(
+        obs_dim=in_features,
+        action_dim=action_dim,
+        num_atoms=config.num_atoms,
+        v_min=config.v_min,
+        v_max=config.v_max,
+        hidden_layer_sizes=config.critic_hidden_layer_sizes,
+        rngs=rngs,
+        num_critics=num_critics,
+    )
+    return actor, critic
+
+
 def train_fast_sac(
     config: FastSACConfig,
     rng: jax.Array,
@@ -93,6 +134,8 @@ def train_fast_sac(
     env: GymnaxEnv | None = None,
     env_params: EnvParams = None,
     log_fn: Callable[..., None] | None = None,
+    make_networks: Callable[..., tuple[nnx.Module, nnx.Module]] | None = None,
+    eval_fn: Callable[..., dict[str, jax.Array]] | None = None,
 ) -> tuple[TrainState, Metrics]:
     """Train a FastSAC agent.
 
@@ -105,6 +148,14 @@ def train_fast_sac(
         env_params: Optional environment parameters. Uses defaults if ``None``.
         log_fn: Optional callback invoked at each evaluation point via
             ``jax.debug.callback``. Receives the metrics dict.
+        make_networks: Optional replacement for ``make_fast_sac_networks`` (same keyword arguments,
+            returns ``(actor, critic)`` with the interfaces documented there).
+        eval_fn: Optional extra evaluation, called as ``eval_fn(act_fn=, actor=, critic=, obs_rms=, rng=)``
+            at the initial evaluation and at every evaluation point; requires ``run_evaluation``.
+            ``act_fn(obs, rng)`` maps one raw observation to an env action, as in the built-in
+            evaluation. The returned dict (fixed keys and shapes) is merged into the metrics. Its
+            ``rng`` derives from ``rng`` and the global step, so training draws the same keys with
+            and without the hook.
 
     Returns:
         A ``(state, metrics)`` tuple where ``state`` is a dict of trained
@@ -145,33 +196,27 @@ def train_fast_sac(
             "Set policy_obs_dim=None for envs without a privileged observation."
         )
     policy_in_features = in_features if config.policy_obs_dim is None else config.policy_obs_dim
+    if eval_fn is not None and not config.run_evaluation:
+        raise ValueError("eval_fn runs at the evaluation points; set run_evaluation=True.")
 
     vmap_step, vmap_reset = create_vec_env_fns(env, config)
 
     # Create networks
     rngs = nnx.Rngs(rng)
-    actor = FastSACPolicy(
-        in_features=policy_in_features,
+    actor, critic = (make_networks if make_networks is not None else make_fast_sac_networks)(
+        policy_in_features=policy_in_features,
+        in_features=in_features,
         action_dim=action_dim,
         action_range=action_range,
-        hidden_layer_sizes=config.actor_hidden_layer_sizes,
-        log_std_range=(config.log_std_min, config.log_std_max),
+        num_critics=NUM_CRITICS,
+        config=config,
         rngs=rngs,
-        policy_obs_dim=config.policy_obs_dim,
     )
     actor_optimizer = nnx.Optimizer(actor, _adamw(config), wrt=nnx.Param)
-    critic = FastSACCritic(
-        obs_dim=in_features,
-        action_dim=action_dim,
-        num_atoms=config.num_atoms,
-        v_min=config.v_min,
-        v_max=config.v_max,
-        hidden_layer_sizes=config.critic_hidden_layer_sizes,
-        rngs=rngs,
-        num_critics=NUM_CRITICS,
-    )
     critic_optimizer = nnx.Optimizer(critic, _adamw(config), wrt=nnx.Param)
     critic_target = nnx.clone(critic)
+    # Root key of the eval_fn keys, kept apart from the training stream (rngs folds its call count into rng)
+    eval_fn_key = jax.random.split(rng)[1]
 
     # Alpha: scalar log-temperature with its own AdamW (weight decay included, as in the reference)
     alpha_tx = _adamw(config)
@@ -399,22 +444,36 @@ def train_fast_sac(
         return carry, actor, actor_optimizer, critic, critic_optimizer, critic_target, rngs
 
     # --- Eval callback ---
-    def eval_callback(carry, actor, rngs):
+    def eval_callback(carry, actor, critic, rngs):
         act_fn = make_eval_act(lambda obs, rng: actor.act(obs, rng), config, carry.obs_rms)
-        return evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
+        eval_lengths, eval_returns = evaluate(act_fn, rngs(), eval_env, env_params, 128, max_steps)
+        if eval_fn is None:
+            return eval_lengths, eval_returns, {}
+        hook_metrics = eval_fn(
+            act_fn=act_fn,
+            actor=actor,
+            critic=critic,
+            obs_rms=carry.obs_rms,
+            rng=jax.random.fold_in(eval_fn_key, carry.global_step),
+        )
+        clashes = set(hook_metrics) & {"eval_lengths", "eval_returns", "train_return", "global_step", *_FAST_SAC_METRIC_NAMES}
+        if clashes:
+            raise ValueError(f"eval_fn returned built-in metric names {sorted(clashes)}.")
+        return eval_lengths, eval_returns, hook_metrics
 
     # --- Outer training loop ---
     steps_per_iter = int(np.ceil(config.eval_freq / num_envs))
     num_evals = int(np.ceil(config.total_timesteps / config.eval_freq))
 
     if config.run_evaluation and not config.skip_initial_evaluation:
-        eval_lengths, eval_returns = eval_callback(carry, actor, rngs)
+        eval_lengths, eval_returns, hook_metrics = eval_callback(carry, actor, critic, rngs)
         initial_metrics = {
             "eval_lengths": eval_lengths,
             "eval_returns": eval_returns,
             "train_return": jnp.float32(0.0),
             "global_step": jnp.int32(0),
             **{k: jnp.float32(0.0) for k in _FAST_SAC_METRIC_NAMES},
+            **hook_metrics,
         }
         if log_fn is not None:
             jax.debug.callback(log_fn, initial_metrics)
@@ -437,10 +496,11 @@ def train_fast_sac(
         train_return = carry.completed_returns_sum / jnp.maximum(carry.completed_returns_count, 1)
 
         if config.run_evaluation:
-            eval_lengths, eval_returns = eval_callback(carry, act, rngs)
+            eval_lengths, eval_returns, hook_metrics = eval_callback(carry, act, cr, rngs)
         else:
             eval_lengths = jnp.zeros(128)
             eval_returns = jnp.zeros(128)
+            hook_metrics = {}
 
         metrics = {
             "eval_lengths": eval_lengths,
@@ -448,6 +508,7 @@ def train_fast_sac(
             "train_return": train_return,
             "global_step": jnp.int32(carry.global_step),
             **avg_tm,
+            **hook_metrics,
         }
 
         if log_fn is not None:

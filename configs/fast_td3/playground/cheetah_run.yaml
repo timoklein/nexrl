@@ -1,0 +1,33 @@
+# Hyperparameters of the official FastTD3 CheetahRunArgs (fast_td3/hyperparams.py: MuJoCoPlaygroundArgs + BaseArgs defaults otherwise).
+# The algorithm stays nexrl's RL-X FastTD3: the obs normalizer updates from replay batches only, training runs in fp32
+# (official: bf16 AMP), and evaluation uses 128 freshly reset episodes (official: 1024 eval envs), so curves are not
+# directly comparable to the official ones.
+# Episode length 1000 and action repeat 1 come from the Playground env config, as in FastTD3's make_env.
+env: playground/CheetahRun
+obs_key: null
+policy_obs_dim: null
+num_envs: 1024
+buffer_size_per_env: 10240  # reference buffer_size (rows per env)
+learning_starts: 10  # vectorized env steps
+batch_size: 32768
+actor_hidden_layer_sizes: [512, 256, 128]
+critic_hidden_layer_sizes: [1024, 512, 256]
+learning_rate: 0.0003
+weight_decay: 0.1
+total_timesteps: 153600000  # reference 150,000 iterations x 1024 envs
+eval_freq: 5120000  # reference eval_interval 5000 iterations x 1024 envs
+gamma: 0.97
+n_step: 3  # reference num_steps
+polyak: 0.9  # reference tau 0.1
+num_atoms: 101
+v_min: -500.0
+v_max: 500.0
+noise_std_min: 0.1  # reference std_min
+noise_std_max: 0.4
+smoothing_noise_std: 0.1  # reference policy_noise
+smoothing_noise_clip: 0.5
+num_critic_updates_per_policy_update: 2
+num_policy_updates_per_step: 1
+normalize_observations: true
+cached_reset: true  # FastTD3's Playground wrapper resets a finished episode to a cached first state
+run_evaluation: true

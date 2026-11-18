@@ -1,8 +1,13 @@
+import dataclasses
+
 import jax
+import numpy as np
 import pytest
+from flax import nnx
 from jax import numpy as jnp
 
 from nexrl import FastSACConfig, train_fast_sac
+from nexrl.algos.fast_sac import make_fast_sac_networks
 
 from .environments import (
     TestEnv1Continuous,
@@ -127,3 +132,51 @@ def test_env5():
     for i in range(obs.shape[0]):
         assert float(actions[:, i].mean()) == pytest.approx(float(obs[i].squeeze()), abs=0.15)
         assert jnp.isclose(actions[:, i], obs[i], atol=0.5).sum() >= 0.9 * num_rngs
+
+
+def test_make_networks_hook():
+    calls = []
+
+    def make_networks(**kwargs):
+        calls.append(kwargs)
+        config = dataclasses.replace(kwargs["config"], actor_hidden_layer_sizes=(8,))
+        return make_fast_sac_networks(**{**kwargs, "config": config})
+
+    config = FastSACConfig(**{**ARGS, "total_timesteps": 1024, "eval_freq": 1024})
+    state, metrics = train_fast_sac(config, jax.random.PRNGKey(0), env=TestEnv1Continuous(), make_networks=make_networks)
+
+    assert sorted(calls[0]) == [
+        "action_dim",
+        "action_range",
+        "config",
+        "in_features",
+        "num_critics",
+        "policy_in_features",
+        "rngs",
+    ]
+    assert calls[0]["action_range"] == (-1.0, 1.0) and calls[0]["num_critics"] == 2
+    kernel_shapes = sorted(x.shape for x in jax.tree.leaves(nnx.state(state["actor"], nnx.Param)) if x.ndim == 2)
+    assert kernel_shapes == [(1, 8), (8, 1), (8, 1)]  # hidden layer, mean head, log-std head
+    assert np.isfinite(metrics["critic_loss"]).all() and (metrics["critic_loss"] != 0).all()
+
+
+def test_eval_fn_hook_keeps_training_keys():
+    def eval_fn(*, act_fn, actor, critic, obs_rms, rng):
+        actions = jax.vmap(act_fn)(jnp.zeros((3, 1)), jax.random.split(rng, 3))
+        return {"hook/action": actions.mean(), "hook/key": jax.random.uniform(rng)}
+
+    config = FastSACConfig(
+        **{**ARGS, "total_timesteps": 2048, "eval_freq": 1024, "run_evaluation": True, "skip_initial_evaluation": False}
+    )
+    env = TestEnv1Continuous()
+    _, plain = train_fast_sac(config, jax.random.PRNGKey(0), env=env)
+    _, hooked = train_fast_sac(config, jax.random.PRNGKey(0), env=env, eval_fn=eval_fn)
+
+    assert set(hooked) == set(plain) | {"hook/action", "hook/key"}
+    # The initial evaluation and 2 evaluation points, each with a fresh key
+    assert len(set(np.asarray(hooked["hook/key"]).tolist())) == 3
+    # The hook draws no training keys: every built-in metric matches the run without it
+    for k in plain:
+        np.testing.assert_allclose(hooked[k], plain[k], rtol=1e-5, atol=1e-6)
+    with pytest.raises(ValueError, match="run_evaluation"):
+        train_fast_sac(FastSACConfig(**ARGS), jax.random.PRNGKey(0), env=env, eval_fn=eval_fn)
